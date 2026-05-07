@@ -20,6 +20,7 @@ BACKOFF_SECONDS = [1, 2, 4]
 HOURLY_VARIABLES = [
     "temperature_2m",
     "precipitation",
+    "precipitation_probability",
     "wind_speed_10m",
     "wind_direction_10m",
     "wind_gusts_10m",
@@ -40,17 +41,18 @@ class Forecast(Base):
         PrimaryKeyConstraint("valid_time", "station_id", "forecast_time"),
     )
 
-    forecast_time = Column(TIMESTAMP(timezone=True), nullable=False)
-    valid_time    = Column(TIMESTAMP(timezone=True), nullable=False)
-    station_id    = Column(TEXT, nullable=False)
-    model         = Column(TEXT, nullable=False, server_default=text("'open-meteo'"))
-    temp_c        = Column(Float)
-    precip_mm     = Column(Float)
-    wind_speed_ms = Column(Float)
-    wind_dir_deg  = Column(Float)
-    pressure_hpa  = Column(Float)
-    humidity_pct  = Column(Float)
-    weather_code  = Column(INTEGER)
+    forecast_time   = Column(TIMESTAMP(timezone=True), nullable=False)
+    valid_time      = Column(TIMESTAMP(timezone=True), nullable=False)
+    station_id      = Column(TEXT, nullable=False)
+    model           = Column(TEXT, nullable=False, server_default=text("'open-meteo'"))
+    temp_c          = Column(Float)
+    precip_mm       = Column(Float)
+    precip_prob_pct = Column(INTEGER)
+    wind_speed_ms   = Column(Float)
+    wind_dir_deg    = Column(Float)
+    pressure_hpa    = Column(Float)
+    humidity_pct    = Column(Float)
+    weather_code    = Column(INTEGER)
 
 
 # ---------------------------------------------------------------------------
@@ -108,16 +110,17 @@ async def fetch_forecast(
 
     rows = [
         {
-            "forecast_time": fetch_time,
-            "valid_time":    datetime.fromisoformat(times[i]),
-            "station_id":    station_id,
-            "temp_c":        hourly["temperature_2m"][i],
-            "precip_mm":     hourly["precipitation"][i],
-            "wind_speed_ms": hourly["wind_speed_10m"][i],
-            "wind_dir_deg":  hourly["wind_direction_10m"][i],
-            "pressure_hpa":  hourly["pressure_msl"][i],
-            "humidity_pct":  hourly["relative_humidity_2m"][i],
-            "weather_code":  hourly["weather_code"][i],
+            "forecast_time":   fetch_time,
+            "valid_time":      datetime.fromisoformat(times[i]),
+            "station_id":      station_id,
+            "temp_c":          hourly["temperature_2m"][i],
+            "precip_mm":       hourly["precipitation"][i],
+            "precip_prob_pct": hourly["precipitation_probability"][i],
+            "wind_speed_ms":   hourly["wind_speed_10m"][i],
+            "wind_dir_deg":    hourly["wind_direction_10m"][i],
+            "pressure_hpa":    hourly["pressure_msl"][i],
+            "humidity_pct":    hourly["relative_humidity_2m"][i],
+            "weather_code":    hourly["weather_code"][i],
         }
         for i in range(len(times))
     ]

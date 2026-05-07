@@ -17,7 +17,7 @@ from src.analysis import get_baseline_errors, get_forecast_bias
 from src.models import BaselineResponse, HealthResponse, IngestionResponse
 from src.scheduler import configure_scheduler, fetch_forecasts_job
 from src.ml import SUPPORTED_HORIZONS, SUPPORTED_TARGETS
-from src.ml.predict import latest_observation, list_available, predict_one
+from src.ml.predict import current_conditions, list_available, predict_one
 
 logging.basicConfig(
     level=logging.INFO,
@@ -213,22 +213,39 @@ async def station_baseline(station_id: str, days: int = 30):
     )
 
 
+async def _resolve_station(
+    session: AsyncSession, station_id: Optional[str]
+) -> Station:
+    """Look up the requested station — or the first registered if omitted."""
+    if station_id is None:
+        row = (await session.execute(select(Station).limit(1))).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="No stations registered")
+        return row
+    row = (await session.execute(
+        select(Station).where(Station.station_id == station_id)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown station: {station_id}")
+    return row
+
+
 @app.get("/api/current")
 async def current_observation(station_id: Optional[str] = None):
-    """Return the most recent raw observation for a station.
+    """Latest observation for a station, enriched with weather icon + feels-like.
 
     If station_id is omitted, picks the first registered station.
     """
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        if station_id is None:
-            row = (await session.execute(select(Station).limit(1))).scalar_one_or_none()
-            if row is None:
-                raise HTTPException(status_code=404, detail="No stations registered")
-            station_id = row.station_id
-        latest = await latest_observation(session, station_id)
-    if latest is None:
-        raise HTTPException(status_code=404, detail=f"No observations for {station_id}")
-    return {"station_id": station_id, **latest}
+        station = await _resolve_station(session, station_id)
+        current = await current_conditions(
+            session, station.station_id, station.lat, station.lon
+        )
+    if current is None:
+        raise HTTPException(
+            status_code=404, detail=f"No observations for {station.station_id}"
+        )
+    return {"station_id": station.station_id, **current}
 
 
 @app.get("/api/predict")
@@ -248,14 +265,10 @@ async def predict(
             status_code=400,
             detail=f"horizon must be one of {list(SUPPORTED_HORIZONS)}",
         )
-    if station_id is None:
-        async with AsyncSession(engine, expire_on_commit=False) as session:
-            row = (await session.execute(select(Station).limit(1))).scalar_one_or_none()
-            if row is None:
-                raise HTTPException(status_code=404, detail="No stations registered")
-            station_id = row.station_id
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        station = await _resolve_station(session, station_id)
 
-    return await predict_one(target, horizon, station_id)
+    return await predict_one(target, horizon, station.station_id, station.lat, station.lon)
 
 
 @app.get("/api/metrics_history")

@@ -62,6 +62,7 @@ class Observation(Base):
     rain_rate_mm_hr     = Column(Float)
     solar_wm2           = Column(Float)
     uv_index            = Column(Float)
+    feels_like_c        = Column(Float)
 
 
 class ModelMetric(Base):
@@ -97,6 +98,16 @@ async def init_db() -> None:
         await conn.execute(text("SELECT pg_advisory_xact_lock(7142531123)"))
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Tables created / verified.")
+
+        # Idempotent ALTERs for columns added after initial schema creation.
+        # We don't use Alembic, so this is the migration story for additive changes.
+        await conn.execute(text(
+            "ALTER TABLE observations ADD COLUMN IF NOT EXISTS feels_like_c FLOAT"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS precip_prob_pct INTEGER"
+        ))
+        logger.info("Schema migrations applied.")
 
         await conn.execute(
             text(
@@ -135,13 +146,19 @@ async def write_observation(session: AsyncSession, data: dict) -> None:
     else:
         obs_time = datetime.now(timezone.utc)
 
+    from src.units import apparent_temperature
+
+    temp_c = data.get("temp_c")
+    humidity = data.get("humidity")
+    wind_ms = data.get("wind_speed_ms")
+
     obs = Observation(
         time          = obs_time,
         station_id    = data.get("passkey", "unknown"),
-        temp_c        = data.get("temp_c"),
-        humidity_pct  = data.get("humidity"),
+        temp_c        = temp_c,
+        humidity_pct  = humidity,
         pressure_hpa  = data.get("pressure_rel_hpa"),
-        wind_speed_ms = data.get("wind_speed_ms"),
+        wind_speed_ms = wind_ms,
         wind_dir_deg  = data.get("wind_dir_deg"),
         wind_gust_ms  = data.get("wind_gust_ms"),
         rain_mm_1h          = data.get("rain_hourly_mm"),
@@ -149,6 +166,7 @@ async def write_observation(session: AsyncSession, data: dict) -> None:
         rain_rate_mm_hr     = data.get("rain_rate_mm_hr"),
         solar_wm2           = data.get("solar_radiation"),
         uv_index            = data.get("uv_index"),
+        feels_like_c        = apparent_temperature(temp_c, humidity, wind_ms),
     )
     session.add(obs)
     logger.debug("Queued observation for station=%s time=%s", obs.station_id, obs.time)

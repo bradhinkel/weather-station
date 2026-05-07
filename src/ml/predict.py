@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import engine
+from src.icons import cond_label, pick_icon_slug
 from src.ml import SUPPORTED_HORIZONS, SUPPORTED_MODELS, SUPPORTED_TARGETS
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "models"))
@@ -70,7 +71,8 @@ WHERE station_id = :sid
 
 _FORECAST_SQL = text("""\
 SELECT temp_c, humidity_pct, pressure_hpa, wind_speed_ms,
-       wind_dir_deg, precip_mm, weather_code, forecast_time
+       wind_dir_deg, precip_mm, precip_prob_pct,
+       weather_code, forecast_time
 FROM forecasts
 WHERE station_id = :sid
   AND valid_time = :target_hour
@@ -80,10 +82,24 @@ LIMIT 1
 
 
 _LATEST_OBS_SQL = text("""\
-SELECT time, temp_c, humidity_pct, pressure_hpa, wind_speed_ms, wind_dir_deg
+SELECT time, temp_c, humidity_pct, pressure_hpa, wind_speed_ms, wind_dir_deg,
+       solar_wm2, rain_mm_1h, feels_like_c
 FROM observations
 WHERE station_id = :sid
 ORDER BY time DESC
+LIMIT 1
+""")
+
+
+# Most recent forecast row whose valid_time covers "now" — used to pick a
+# weather_code for the current-conditions icon. We round "now" down to the hour
+# to match how forecasts are bucketed.
+_CURRENT_FORECAST_SQL = text("""\
+SELECT weather_code, precip_prob_pct
+FROM forecasts
+WHERE station_id = :sid
+  AND valid_time = :now_hour
+ORDER BY forecast_time DESC
 LIMIT 1
 """)
 
@@ -99,7 +115,42 @@ async def latest_observation(session: AsyncSession, station_id: str) -> Optional
         "pressure_hpa": row.pressure_hpa,
         "wind_speed_ms": row.wind_speed_ms,
         "wind_dir_deg": row.wind_dir_deg,
+        "solar_wm2": row.solar_wm2,
+        "rain_mm_1h": row.rain_mm_1h,
+        "feels_like_c": row.feels_like_c,
     }
+
+
+async def current_conditions(
+    session: AsyncSession, station_id: str, lat: float, lon: float
+) -> Optional[dict]:
+    """Latest observation enriched with weather icon + plain-language label.
+
+    The icon is chosen from the most recent forecast for the current hour, then
+    locally overridden if the station's own rain gauge or pyranometer disagrees.
+    """
+    obs = await latest_observation(session, station_id)
+    if obs is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    now_hour = now.replace(minute=0, second=0, microsecond=0)
+    fc_row = (await session.execute(
+        _CURRENT_FORECAST_SQL,
+        {"sid": station_id, "now_hour": now_hour},
+    )).one_or_none()
+
+    weather_code = fc_row.weather_code if fc_row is not None else None
+    slug = pick_icon_slug(
+        weather_code=weather_code,
+        lat=lat, lon=lon, t=now,
+        rain_mm_1h=obs.get("rain_mm_1h"),
+        solar_wm2=obs.get("solar_wm2"),
+    )
+    obs["weather_code"] = weather_code
+    obs["icon_slug"] = slug
+    obs["cond_label"] = cond_label(slug)
+    return obs
 
 
 def _build_feature_dict(
@@ -140,7 +191,13 @@ def _build_feature_dict(
     return feat
 
 
-async def predict_one(target: str, horizon: int, station_id: str) -> dict[str, Any]:
+async def predict_one(
+    target: str,
+    horizon: int,
+    station_id: str,
+    lat: float,
+    lon: float,
+) -> dict[str, Any]:
     if target not in SUPPORTED_TARGETS:
         raise ValueError(f"Unsupported target: {target}")
     if horizon not in SUPPORTED_HORIZONS:
@@ -174,6 +231,10 @@ async def predict_one(target: str, horizon: int, station_id: str) -> dict[str, A
         "latest_observation": latest,
         "open_meteo": None,
         "open_meteo_forecast_time": None,
+        "weather_code": None,
+        "icon_slug": None,
+        "cond_label": None,
+        "precip_prob_pct": None,
         "linear": None,
         "xgboost": None,
         "metrics": {},
@@ -187,6 +248,16 @@ async def predict_one(target: str, horizon: int, station_id: str) -> dict[str, A
         return response
 
     response["open_meteo_forecast_time"] = forecast_row.forecast_time.isoformat()
+    response["weather_code"] = forecast_row.weather_code
+    # Forecast icon is from Open-Meteo's weather_code; no sensor overrides apply
+    # to a future hour we haven't observed yet.
+    slug = pick_icon_slug(
+        weather_code=forecast_row.weather_code,
+        lat=lat, lon=lon, t=target_hour,
+    )
+    response["icon_slug"] = slug
+    response["cond_label"] = cond_label(slug)
+    response["precip_prob_pct"] = forecast_row.precip_prob_pct
 
     if target == "temp_c":
         response["open_meteo"] = float(forecast_row.temp_c) if forecast_row.temp_c is not None else None

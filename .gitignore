@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 models/
 
+# WSL-on-Windows artifact attached to downloaded files
+*:Zone.Identifier
+
 # Local backup (not part of the project)
 ~weather-station/
 
