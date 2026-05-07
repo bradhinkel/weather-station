@@ -1,72 +1,101 @@
 # weather-station
 
+> **Live:** [weather.bradhinkel.com](https://weather.bradhinkel.com)
+
 Personal weather station case study: an Ecowitt sensor in a Seattle backyard
-streams observations to a local FastAPI service, which compares the
+streams observations to a FastAPI service, which compares the
 [Open-Meteo](https://open-meteo.com/) public regional forecast against two
-locally-trained ML models (linear regression and XGBoost) for the same target.
+locally-trained ML models (Ridge regression and XGBoost) at three horizons
+(+1 h, +3 h, +24 h).
 
 The whole point is to **measure how a backyard microclimate diverges from the
-regional forecast** — the biases are the signal, not noise — and to test how
-much of that gap a small ML model can recover from short-window data.
+regional forecast** — the biases are the signal, not noise — and to track how
+much of that gap a small ML model can recover as data accumulates.
+
+## Live results (Seattle backyard, retrained 2026-05-07)
+
+About one month of data, 240–305 paired (forecast, observation) hourly samples
+per horizon after a temporal 80/20 split.
+
+| Horizon | Open-Meteo MAE | Linear MAE | XGBoost MAE | Best vs. baseline |
+|---------|----------------|------------|-------------|-------------------|
+| +1 h    | 2.91 °C        | 1.09 °C    | 1.10 °C     | **−63 %**         |
+| +3 h    | 2.91 °C        | 2.09 °C    | 2.21 °C     | **−28 %**         |
+| +24 h   | 2.90 °C        | 2.90 °C    | 2.60 °C     | **−10 %**         |
+
+Reading: at +1 h, lagged observations contain a lot of signal that lets even
+Ridge regression cut the regional forecast's error by nearly 2/3. By +24 h the
+lag features are stale and ML barely edges the public forecast — that's the
+expected curve, and seeing it bend is part of the point. The +3 h row sits
+exactly in between, as data thinning would predict. A `model_metrics` table
+appends a row on every retrain so this curve becomes a time-series.
+
+Rain target is structurally wired but unfit to train: zero non-zero rain in
+the training window. It will become useful once a few weeks of mixed weather
+have passed; the path is a 2-stage classifier-then-regressor.
 
 ## Architecture
 
 ```
-Ecowitt sensor  ──HTTP POST──▶  FastAPI /api/ecowitt
-                                       │
-                                       ▼
-                               TimescaleDB (observations + forecasts)
-                                       ▲
-                                       │
-              Open-Meteo  ──hourly fetch (APScheduler)──┘
-                                       │
-                                       ▼
-                       /api/predict?target=temp_c&horizon=1
-                                       │
-                              ┌────────┴─────────┐
-                              ▼                  ▼
-                     Open-Meteo baseline   joblib model bundles
-                                           (linear, xgboost)
-                                       │
-                                       ▼
+                                    ┌────────────────────────┐
+Ecowitt GW2000 ──HTTP──▶  /api/ecowitt│ FastAPI                │
+                                    │   • lifespan: init_db,  │
+                                    │     scheduler, prefetch │
+                                    │   • mtime-cached models │
+Open-Meteo ──hourly job──▶  forecasts│   • icons + feels-like  │
+                                    └─────────┬──────────────┘
+                                              ▼
+                              PostgreSQL 16 + TimescaleDB
+                              hypertables: observations,
+                                           forecasts,
+                                           model_metrics
+                                              │
+                            ┌─────────────────┴─────────────────┐
+                            ▼                                   ▼
+              /api/predict?target=&horizon=          /api/current, /api/models,
+              → Open-Meteo + Ridge + XGBoost           /api/metrics_history
+                                              │
+                                              ▼
                               Static HTML dashboard at /
+                              (vanilla JS, segmented horizon control,
+                               weather icons, 3-way comparison)
 ```
 
 | Component | Stack |
 |----------|-------|
-| Ingest API | FastAPI + asyncpg |
-| Database | PostgreSQL 16 + TimescaleDB hypertables |
-| Scheduler | APScheduler (forecast pulls every hour) |
-| ML | scikit-learn (Ridge), XGBoost, joblib persistence |
-| UI | Single static HTML page, fetches `/api/predict` |
-| Deploy | Docker Compose (locally), nginx + systemd (droplet) |
+| Ingest API | FastAPI + SQLAlchemy + asyncpg |
+| Database | PostgreSQL 16 + TimescaleDB 2 |
+| Scheduler | APScheduler — forecast pull every hour, weekly retrain |
+| ML | scikit-learn (Ridge), XGBoost, joblib bundles |
+| Solar / day-night | [pysolar](https://pypi.org/project/pysolar/) |
+| Icons | [basmilius/weather-icons](https://github.com/basmilius/weather-icons) static-fill SVG (vendored, MIT) |
+| UI | One static HTML page, vanilla JS, fetches the JSON endpoints |
+| Production | Ubuntu 24.04 droplet, native Python venv + systemd, nginx + Let's Encrypt |
+| Local dev | Docker Compose (`db` + `api` + `grafana`) |
 
 ## Targets and horizons
 
-The dataset/training code is parameterised over `(target, horizon)`:
+Dataset/training code is parameterised over `(target, horizon)`:
 
-|              | +1 hour | +24 hours |
-|--------------|--------|-----------|
-| `temp_c`     | trained | trained   |
-| `rain_mm_1h` | wired in (zero-inflated; needs more data + 2-stage architecture) | same |
+|              | +1 h | +3 h | +24 h |
+|--------------|------|------|-------|
+| `temp_c`     | trained | trained | trained |
+| `rain_mm_1h` | wired in (zero-inflated; needs more data + 2-stage architecture) | same | same |
 
 Models persist as `models/{target}_{horizon}h_{model}.joblib`.
 
-## Initial results (Seattle backyard, 2026-04-09 → 2026-05-06)
+## API endpoints
 
-About one month of data, ~285 paired (forecast, observation) hourly samples
-after a temporal 80/20 split.
-
-| Horizon | Open-Meteo MAE | Linear MAE | XGBoost MAE | Best vs. baseline |
-|---------|----------------|------------|-------------|-------------------|
-| +1 h    | 2.91 °C        | 1.05 °C    | 1.10 °C     | **−64 %**         |
-| +24 h   | 2.90 °C        | 2.91 °C    | 2.60 °C     | **−10 %**         |
-
-Reading: at +1 h, lagged observations contain a lot of signal that lets
-even Ridge regression cut the regional forecast's error by nearly 2/3. At
-+24 h, the lag features are stale and both ML models barely beat the public
-forecast. This is the expected story — and exactly the kind of result that
-motivates collecting more data before claiming the trees model "works."
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/ecowitt` | Ecowitt sensor webhook (form-encoded) |
+| GET  | `/api/current` | Latest observation enriched with `feels_like_c`, `icon_slug`, `cond_label` |
+| GET  | `/api/predict?target=…&horizon=…` | 3-way comparison + `weather_code`, `icon_slug`, `cond_label`, `precip_prob_pct` |
+| GET  | `/api/models` | Inventory of currently-loadable model bundles |
+| GET  | `/api/metrics_history?target=…&horizon=…&model=…` | Time-series of training-run metrics for plotting |
+| GET  | `/api/stations/{id}/baseline?days=N` | Forecast bias / MAE summary by lead time |
+| GET  | `/health` | Liveness |
+| GET  | `/` | Comparison dashboard |
 
 ## Running locally
 
@@ -75,36 +104,49 @@ cp .env.example .env   # set DB_USER, DB_PASSWORD, DB_NAME
 docker compose up -d   # postgres + api + grafana
 ```
 
-API is at http://localhost:8000 (dashboard at `/`, API docs at `/docs`).
-
-To train models against a populated database (the `db` service is exposed
-on `127.0.0.1:5433` via the compose file):
+API at <http://localhost:8000>; dashboard at `/`; OpenAPI docs at `/docs`.
+The `db` service is exposed on `127.0.0.1:5433` so a host venv can run
+training scripts:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 DB_HOST=127.0.0.1 DB_PORT=5433 \
 DB_USER=weather DB_PASSWORD=... DB_NAME=weatherstation \
-  python -m src.ml.train --target temp_c --horizon 1
+  python -m src.ml.train --target temp_c --horizon 3
 ```
 
-The trained `*.joblib` lands in `models/` (a Docker volume, persisted
-across rebuilds).
+Trained `*.joblib` lands in `models/`. The API's predict cache reloads on
+mtime change — no service restart required after a retrain.
 
-## API endpoints
+## Production layout
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/api/ecowitt` | Ecowitt webhook (form-encoded) |
-| GET  | `/api/current` | Latest observation |
-| GET  | `/api/predict?target=…&horizon=…` | 3-way comparison |
-| GET  | `/api/models` | Inventory of trained models |
-| GET  | `/api/stations/{id}/baseline?days=N` | Forecast bias / MAE summary |
-| GET  | `/health` | Liveness |
-| GET  | `/` | Comparison dashboard |
+The droplet runs the whole stack natively (no Docker) to share a host with
+two unrelated sites. Conventions:
 
-## Status
+- App dir: `/opt/weather-station/` (owner `www-data`)
+- venv: `/opt/weather-station/venv/`
+- env file: `/opt/weather-station/.env`
+- systemd: `weather-backend.service` (uvicorn, port 8003) + `weather-retrain.timer`
+- nginx: `/etc/nginx/sites-enabled/weather.bradhinkel.com` proxies `→ 127.0.0.1:8003`. The `server_name` includes the droplet IP because Ecowitt firmware sends the resolved IP as the HTTP `Host` header.
+- `weather-retrain.timer`: weekly, Sundays 11:00 UTC; appends to `model_metrics`. New `(target, horizon)` combinations need to be bootstrapped manually with `python -m src.ml.train` once before the timer picks them up.
 
-This is a personal project, intentionally small and slow-paced. The
-modeling timeline is deliberately conservative — see commits and the
-`/api/predict` metrics to track how the bias narrows as data accumulates.
+## Status & roadmap
+
+| Milestone | When |
+|-----------|------|
+| Linear regression baseline | ✅ shipped 2026-05-06 |
+| XGBoost (early — under-data on purpose) | ✅ shipped 2026-05-06 |
+| Public deploy + first weekly retrain | ✅ shipped 2026-05-07 |
+| +3 h horizon | ✅ shipped 2026-05-07 |
+| Atmospheric UX (icons, feels-like, segmented control) | ✅ shipped 2026-05-07 |
+| First "real" results window with ~6 weeks of data | target ~2026-06-15 |
+| Random Forest with confidence bands | with the trees milestone |
+| LSTM experiment (intentionally under-data) | target ~2026-11-01 |
+
+This is a personal project, intentionally small and slow-paced. The modeling
+timeline is deliberately conservative — watch the `model_metrics` time-series
+to see how the bias narrows as data accumulates.
+
+The original design hand-off that drove the atmospheric UX changes is preserved
+in `Hand-off - Atmospheric UX.md`.
