@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+models/
+
+# Local backup (not part of the project)
+~weather-station/
+
+# Private planning notes (not for public repo)
+weather_station_plan.docx

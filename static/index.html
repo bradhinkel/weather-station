@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weather Station — Forecast Comparison</title>
+  <style>
+    :root {
+      --bg: #0f1218;
+      --panel: #181c25;
+      --line: #232836;
+      --text: #e8ecf3;
+      --muted: #8a95a8;
+      --accent: #5cc8ff;
+      --good: #57e389;
+      --warn: #f9c647;
+      --bad:  #ff7a85;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px; min-height: 100vh;
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+    .grid { display: grid; gap: 16px; max-width: 1080px; margin: 0 auto; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; padding: 18px;
+    }
+    .card h2 {
+      font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); margin: 0 0 12px;
+    }
+    .big {
+      display: flex; align-items: baseline; gap: 8px;
+    }
+    .big .num { font-size: 36px; font-weight: 600; }
+    .big .unit { font-size: 16px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      padding: 10px 8px; text-align: left;
+      border-bottom: 1px solid var(--line); font-size: 14px;
+    }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+      margin-bottom: 16px;
+    }
+    .controls label { color: var(--muted); font-size: 13px; }
+    .controls select {
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--line); border-radius: 6px;
+      padding: 6px 10px; font-size: 14px;
+    }
+    .badge {
+      display: inline-block; padding: 2px 8px; font-size: 11px;
+      border-radius: 4px; background: var(--line); color: var(--muted);
+    }
+    .badge.good { background: rgba(87, 227, 137, 0.18); color: var(--good); }
+    .badge.warn { background: rgba(249, 198, 71, 0.18); color: var(--warn); }
+    .delta-pos { color: var(--bad); }
+    .delta-neg { color: var(--good); }
+    .footnote { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 8px; }
+    .pred-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .pred-row:last-child { border-bottom: none; }
+    .pred-name { font-weight: 500; }
+    .pred-val { font-size: 22px; font-weight: 600; }
+    .pred-meta { color: var(--muted); font-size: 12px; }
+    .warn-banner {
+      background: rgba(249, 198, 71, 0.10); color: var(--warn);
+      border: 1px solid rgba(249, 198, 71, 0.3); border-radius: 8px;
+      padding: 10px 14px; font-size: 13px; margin-bottom: 12px;
+    }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="grid">
+    <div>
+      <h1>Backyard Weather Station</h1>
+      <div class="sub">
+        Real-time observations vs. Open-Meteo forecast vs. local ML models.
+        <span id="updated"></span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>Target
+        <select id="target">
+          <option value="temp_c">Temperature</option>
+          <option value="rain_mm_1h">Rain (1h total)</option>
+        </select>
+      </label>
+      <label>Horizon
+        <select id="horizon">
+          <option value="1">+1 hour</option>
+          <option value="24">+24 hours</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="warnings"></div>
+
+    <div class="row">
+      <div class="card">
+        <h2>Current observation</h2>
+        <div class="big"><span class="num" id="obs_temp">—</span><span class="unit">°C</span></div>
+        <div class="footnote" id="obs_meta">Loading…</div>
+        <table style="margin-top:12px">
+          <tr><th>Humidity</th><td><span id="obs_humidity">—</span> %</td></tr>
+          <tr><th>Pressure</th><td><span id="obs_pressure">—</span> hPa</td></tr>
+          <tr><th>Wind</th><td><span id="obs_wind">—</span> m/s @ <span id="obs_winddir">—</span>°</td></tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Forecast for <span id="target_label">temp</span> at <span id="valid_time_label">…</span></h2>
+        <div class="pred-row">
+          <div>
+            <div class="pred-name">Open-Meteo</div>
+            <div class="pred-meta">Public regional forecast</div>
+          </div>
+          <div style="text-align:right">
+            <div class="pred-val" id="p_om">—</div>
+            <div class="pred-meta" id="p_om_delta"></div>
+          </div>
+        </div>
+        <div class="pred-row">
+          <div>
+            <div class="pred-name">Linear regression</div>
+            <div class="pred-meta" id="p_linear_meta">Local ML baseline</div>
+          </div>
+          <div style="text-align:right">
+            <div class="pred-val" id="p_linear">—</div>
+            <div class="pred-meta" id="p_linear_delta"></div>
+          </div>
+        </div>
+        <div class="pred-row">
+          <div>
+            <div class="pred-name">XGBoost</div>
+            <div class="pred-meta" id="p_xgb_meta">Gradient-boosted trees</div>
+          </div>
+          <div style="text-align:right">
+            <div class="pred-val" id="p_xgb">—</div>
+            <div class="pred-meta" id="p_xgb_delta"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Model accuracy on hold-out test set</h2>
+      <table>
+        <thead>
+          <tr><th>Model</th><th>Test MAE</th><th>Test RMSE</th><th>Test n</th><th>Trained</th></tr>
+        </thead>
+        <tbody id="metrics_tbody">
+          <tr><td colspan="5" class="pred-meta">Select a target/horizon to load metrics.</td></tr>
+        </tbody>
+      </table>
+      <div class="footnote">
+        MAE/RMSE are computed on the most-recent 20% of paired (forecast, observation) hours,
+        held out from training. The Open-Meteo row uses the raw forecast as the prediction.
+      </div>
+    </div>
+  </div>
+
+<script>
+const TARGET_UNITS = { temp_c: "°C", rain_mm_1h: "mm" };
+const TARGET_LABELS = { temp_c: "temperature", rain_mm_1h: "rain (1h)" };
+
+function fmt(v, digits=2) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return Number(v).toFixed(digits);
+}
+
+function deltaText(pred, baseline, unit) {
+  if (pred === null || baseline === null) return "";
+  const d = pred - baseline;
+  const sign = d >= 0 ? "+" : "";
+  const cls = d >= 0 ? "delta-pos" : "delta-neg";
+  return `<span class="${cls}">${sign}${d.toFixed(2)} ${unit} vs Open-Meteo</span>`;
+}
+
+async function refresh() {
+  const target = document.getElementById("target").value;
+  const horizon = document.getElementById("horizon").value;
+  document.getElementById("target_label").textContent = TARGET_LABELS[target];
+  const unit = TARGET_UNITS[target];
+
+  let predData = null, curData = null, modelsData = null;
+  try {
+    [predData, curData, modelsData] = await Promise.all([
+      fetch(`/api/predict?target=${target}&horizon=${horizon}`).then(r => r.json()),
+      fetch(`/api/current`).then(r => r.json()),
+      fetch(`/api/models`).then(r => r.json()),
+    ]);
+  } catch (e) {
+    document.getElementById("warnings").innerHTML =
+      `<div class="warn-banner">API request failed: ${e}</div>`;
+    return;
+  }
+
+  // Current obs
+  if (curData && !curData.detail) {
+    document.getElementById("obs_temp").textContent = fmt(curData.temp_c, 1);
+    document.getElementById("obs_humidity").textContent = fmt(curData.humidity_pct, 0);
+    document.getElementById("obs_pressure").textContent = fmt(curData.pressure_hpa, 1);
+    document.getElementById("obs_wind").textContent = fmt(curData.wind_speed_ms, 1);
+    document.getElementById("obs_winddir").textContent = fmt(curData.wind_dir_deg, 0);
+    const t = new Date(curData.time);
+    document.getElementById("obs_meta").textContent =
+      `Latest reading: ${t.toLocaleString()}`;
+  }
+
+  // Predictions
+  const om = predData?.open_meteo;
+  document.getElementById("p_om").textContent = `${fmt(om)} ${unit}`;
+  const lin = predData?.linear;
+  document.getElementById("p_linear").textContent = lin === null ? "—" : `${fmt(lin)} ${unit}`;
+  document.getElementById("p_linear_delta").innerHTML = deltaText(lin, om, unit);
+  const xgb = predData?.xgboost;
+  document.getElementById("p_xgb").textContent = xgb === null ? "—" : `${fmt(xgb)} ${unit}`;
+  document.getElementById("p_xgb_delta").innerHTML = deltaText(xgb, om, unit);
+  if (predData?.valid_time) {
+    document.getElementById("valid_time_label").textContent =
+      new Date(predData.valid_time).toLocaleString();
+  }
+
+  // Warnings
+  const warnings = predData?.warnings || [];
+  document.getElementById("warnings").innerHTML = warnings.length
+    ? `<div class="warn-banner">${warnings.join(" · ")}</div>`
+    : "";
+
+  // Metrics row
+  const metrics = predData?.metrics || {};
+  const rows = [];
+  if (Object.keys(metrics).length === 0) {
+    rows.push(`<tr><td colspan="5" class="pred-meta">No trained model for this combination yet.</td></tr>`);
+  } else {
+    // Open-Meteo baseline (same for both linear+xgboost rows; pick first available)
+    const sample = Object.values(metrics)[0];
+    if (sample?.openmeteo_mae !== undefined) {
+      rows.push(`<tr><td>Open-Meteo (baseline)</td><td>${fmt(sample.openmeteo_mae)}</td><td>${fmt(sample.openmeteo_rmse)}</td><td>${sample.n_test}</td><td>—</td></tr>`);
+    }
+    for (const name of ["linear", "xgboost"]) {
+      const m = metrics[name];
+      if (!m) continue;
+      rows.push(`<tr><td>${name}</td><td>${fmt(m.mae)}</td><td>${fmt(m.rmse)}</td><td>${m.n_test}</td><td>—</td></tr>`);
+    }
+  }
+  document.getElementById("metrics_tbody").innerHTML = rows.join("");
+  document.getElementById("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+document.getElementById("target").addEventListener("change", refresh);
+document.getElementById("horizon").addEventListener("change", refresh);
+refresh();
+setInterval(refresh, 60_000);
+</script>
+</body>
+</html>

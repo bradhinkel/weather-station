@@ -1,0 +1,142 @@
+import logging
+import os
+from datetime import datetime, timezone
+
+from dotenv import load_dotenv
+from sqlalchemy import TEXT, Column, Float, text
+from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import declarative_base
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+Base = declarative_base()
+
+
+def _build_dsn() -> str:
+    host = os.environ["DB_HOST"]
+    port = os.environ.get("DB_PORT", "5432")
+    name = os.environ["DB_NAME"]
+    user = os.environ["DB_USER"]
+    password = os.environ["DB_PASSWORD"]
+    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{name}"
+
+
+engine = create_async_engine(_build_dsn(), echo=False, future=True)
+
+
+# ---------------------------------------------------------------------------
+# ORM models
+# ---------------------------------------------------------------------------
+
+class Station(Base):
+    __tablename__ = "stations"
+
+    station_id  = Column(TEXT, primary_key=True)
+    name        = Column(TEXT)
+    lat         = Column(Float)
+    lon         = Column(Float)
+    elevation_m = Column(Float)
+    timezone    = Column(TEXT)
+    created_at  = Column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+class Observation(Base):
+    __tablename__ = "observations"
+
+    time          = Column(TIMESTAMP(timezone=True), primary_key=True, nullable=False)
+    station_id    = Column(TEXT, primary_key=True, nullable=False)
+    temp_c        = Column(Float)
+    humidity_pct  = Column(Float)
+    pressure_hpa  = Column(Float)
+    wind_speed_ms = Column(Float)
+    wind_dir_deg  = Column(Float)
+    wind_gust_ms  = Column(Float)
+    rain_mm_1h          = Column(Float)
+    rain_mm_daily_total = Column(Float)
+    rain_rate_mm_hr     = Column(Float)
+    solar_wm2           = Column(Float)
+    uv_index            = Column(Float)
+
+
+# ---------------------------------------------------------------------------
+# Initialisation
+# ---------------------------------------------------------------------------
+
+async def init_db() -> None:
+    """Create tables (if absent), then promote to TimescaleDB hypertables."""
+    import src.openmeteo  # noqa: F401 — registers Forecast on Base.metadata
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        logger.info("Tables created / verified.")
+
+        await conn.execute(
+            text(
+                "SELECT create_hypertable('observations', 'time', if_not_exists => TRUE)"
+            )
+        )
+        await conn.execute(
+            text(
+                "SELECT create_hypertable('forecasts', 'valid_time', if_not_exists => TRUE)"
+            )
+        )
+        logger.info("Hypertables initialised.")
+
+
+# ---------------------------------------------------------------------------
+# Write helper
+# ---------------------------------------------------------------------------
+
+async def write_observation(session: AsyncSession, data: dict) -> None:
+    """
+    Insert one Observation row.
+
+    `data` is the converted dict produced by api.validate_and_convert().
+    The caller is responsible for committing (or using an async context manager).
+    """
+    # Resolve the observation timestamp.
+    raw_time = data.get("dateutc")
+    if raw_time:
+        try:
+            obs_time = datetime.strptime(raw_time, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            logger.warning("Unparseable dateutc %r — using server time.", raw_time)
+            obs_time = datetime.now(timezone.utc)
+    else:
+        obs_time = datetime.now(timezone.utc)
+
+    obs = Observation(
+        time          = obs_time,
+        station_id    = data.get("passkey", "unknown"),
+        temp_c        = data.get("temp_c"),
+        humidity_pct  = data.get("humidity"),
+        pressure_hpa  = data.get("pressure_rel_hpa"),
+        wind_speed_ms = data.get("wind_speed_ms"),
+        wind_dir_deg  = data.get("wind_dir_deg"),
+        wind_gust_ms  = data.get("wind_gust_ms"),
+        rain_mm_1h          = data.get("rain_hourly_mm"),
+        rain_mm_daily_total = data.get("rain_daily_mm"),
+        rain_rate_mm_hr     = data.get("rain_rate_mm_hr"),
+        solar_wm2           = data.get("solar_radiation"),
+        uv_index            = data.get("uv_index"),
+    )
+    session.add(obs)
+    logger.debug("Queued observation for station=%s time=%s", obs.station_id, obs.time)
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    asyncio.run(init_db())

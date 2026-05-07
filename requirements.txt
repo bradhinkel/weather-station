@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+asyncpg
+sqlalchemy[asyncio]
+psycopg2-binary
+pydantic
+python-multipart
+python-dotenv
+apscheduler
+httpx
+joblib
+numpy
+pandas
+scikit-learn
+xgboost
