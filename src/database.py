@@ -85,10 +85,16 @@ class ModelMetric(Base):
 # ---------------------------------------------------------------------------
 
 async def init_db() -> None:
-    """Create tables (if absent), then promote to TimescaleDB hypertables."""
+    """Create tables (if absent), then promote to TimescaleDB hypertables.
+
+    Uses a postgres advisory lock so multiple uvicorn workers don't race on
+    CREATE TABLE during startup — without the lock, one worker briefly fails
+    with `duplicate key in pg_type` and gets respawned by uvicorn.
+    """
     import src.openmeteo  # noqa: F401 — registers Forecast on Base.metadata
 
     async with engine.begin() as conn:
+        await conn.execute(text("SELECT pg_advisory_xact_lock(7142531123)"))
         await conn.run_sync(Base.metadata.create_all)
         logger.info("Tables created / verified.")
 
