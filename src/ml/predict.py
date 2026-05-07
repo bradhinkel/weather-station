@@ -22,17 +22,23 @@ from src.ml import SUPPORTED_HORIZONS, SUPPORTED_MODELS, SUPPORTED_TARGETS
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "models"))
 
-_cache: dict[tuple[str, int, str], dict] = {}
+# Cache holds (mtime_ns, bundle). When the file on disk has a newer mtime than
+# the cached entry, we reload — so a retrain landing a fresh joblib gets picked
+# up on the next predict without restarting the API.
+_cache: dict[tuple[str, int, str], tuple[int, dict]] = {}
 
 
 def load_bundle(target: str, horizon: int, model_name: str) -> Optional[dict]:
     key = (target, horizon, model_name)
-    if key not in _cache:
-        path = MODEL_DIR / f"{target}_{horizon}h_{model_name}.joblib"
-        if not path.exists():
-            return None
-        _cache[key] = joblib.load(path)
-    return _cache[key]
+    path = MODEL_DIR / f"{target}_{horizon}h_{model_name}.joblib"
+    if not path.exists():
+        _cache.pop(key, None)
+        return None
+    mtime_ns = path.stat().st_mtime_ns
+    cached = _cache.get(key)
+    if cached is None or cached[0] != mtime_ns:
+        _cache[key] = (mtime_ns, joblib.load(path))
+    return _cache[key][1]
 
 
 def list_available() -> dict[tuple[str, int], list[str]]:

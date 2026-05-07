@@ -25,8 +25,9 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sqlalchemy import create_engine, text
 
-from src.ml.dataset import build_dataset
+from src.ml.dataset import _sync_dsn, build_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,50 @@ def _save(bundle: dict, path: Path) -> None:
     joblib.dump(bundle, path)
 
 
+def _log_metric_row(
+    trained_at: datetime,
+    target: str,
+    horizon: int,
+    model_name: str,
+    metrics: dict,
+    n_train: int,
+) -> None:
+    """Append one row to model_metrics. Best-effort — failure here is logged but
+    does not fail training (the joblib bundle is already on disk)."""
+    try:
+        engine = create_engine(_sync_dsn())
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO model_metrics (
+                        trained_at, target, horizon, model,
+                        mae, rmse, n_train, n_test,
+                        openmeteo_mae, openmeteo_rmse
+                    ) VALUES (
+                        :trained_at, :target, :horizon, :model,
+                        :mae, :rmse, :n_train, :n_test,
+                        :openmeteo_mae, :openmeteo_rmse
+                    )
+                    ON CONFLICT (trained_at, target, horizon, model) DO NOTHING
+                """),
+                {
+                    "trained_at": trained_at,
+                    "target": target,
+                    "horizon": horizon,
+                    "model": model_name,
+                    "mae": metrics["mae"],
+                    "rmse": metrics["rmse"],
+                    "n_train": n_train,
+                    "n_test": metrics["n_test"],
+                    "openmeteo_mae": metrics["openmeteo_mae"],
+                    "openmeteo_rmse": metrics["openmeteo_rmse"],
+                },
+            )
+        engine.dispose()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Failed to write model_metrics row: %s", exc)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
@@ -103,7 +148,8 @@ def main():
     logger.info("Split: %d train / %d test", len(X_train), len(X_test))
 
     summary = {"target": args.target, "horizon": args.horizon}
-    trained_at = datetime.now(timezone.utc).isoformat()
+    trained_at = datetime.now(timezone.utc)
+    trained_at_iso = trained_at.isoformat()
 
     logger.info("Training linear (Ridge)…")
     lin = train_linear(X_train, y_train)
@@ -116,10 +162,11 @@ def main():
     _save(
         {
             "model": lin, "feature_cols": feature_cols, "metrics": lin_metrics,
-            "target": args.target, "horizon": args.horizon, "trained_at": trained_at,
+            "target": args.target, "horizon": args.horizon, "trained_at": trained_at_iso,
         },
         MODEL_DIR / f"{args.target}_{args.horizon}h_linear.joblib",
     )
+    _log_metric_row(trained_at, args.target, args.horizon, "linear", lin_metrics, len(X_train))
     summary["linear"] = lin_metrics
 
     if not args.no_xgb:
@@ -134,10 +181,11 @@ def main():
         _save(
             {
                 "model": xg, "feature_cols": feature_cols, "metrics": xg_metrics,
-                "target": args.target, "horizon": args.horizon, "trained_at": trained_at,
+                "target": args.target, "horizon": args.horizon, "trained_at": trained_at_iso,
             },
             MODEL_DIR / f"{args.target}_{args.horizon}h_xgboost.joblib",
         )
+        _log_metric_row(trained_at, args.target, args.horizon, "xgboost", xg_metrics, len(X_train))
         summary["xgboost"] = xg_metrics
 
     print(json.dumps(summary, indent=2))

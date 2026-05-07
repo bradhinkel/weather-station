@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from sqlalchemy import TEXT, Column, Float, text
+from sqlalchemy import INTEGER, TEXT, Column, Float, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base
@@ -62,6 +62,22 @@ class Observation(Base):
     rain_rate_mm_hr     = Column(Float)
     solar_wm2           = Column(Float)
     uv_index            = Column(Float)
+
+
+class ModelMetric(Base):
+    """One row per (training run × model) — used to plot MAE/RMSE over time."""
+    __tablename__ = "model_metrics"
+
+    trained_at    = Column(TIMESTAMP(timezone=True), primary_key=True, nullable=False)
+    target        = Column(TEXT, primary_key=True, nullable=False)
+    horizon       = Column(INTEGER, primary_key=True, nullable=False)
+    model         = Column(TEXT, primary_key=True, nullable=False)
+    mae           = Column(Float)
+    rmse          = Column(Float)
+    n_train       = Column(INTEGER)
+    n_test        = Column(INTEGER)
+    openmeteo_mae  = Column(Float)
+    openmeteo_rmse = Column(Float)
 
 
 # ---------------------------------------------------------------------------

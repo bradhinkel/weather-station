@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import Station, engine, init_db, write_observation
+from sqlalchemy import text as _sa_text
 from src.analysis import get_baseline_errors, get_forecast_bias
 from src.models import BaselineResponse, HealthResponse, IngestionResponse
 from src.scheduler import configure_scheduler, fetch_forecasts_job
@@ -255,6 +256,49 @@ async def predict(
             station_id = row.station_id
 
     return await predict_one(target, horizon, station_id)
+
+
+@app.get("/api/metrics_history")
+async def metrics_history(
+    target: str = Query("temp_c"),
+    horizon: int = Query(1, ge=1),
+    model: Optional[str] = Query(None, description="Filter by model name. Defaults to all."),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    """Time-series of training-run metrics for plotting MAE-over-time."""
+    sql = _sa_text("""\
+        SELECT trained_at, target, horizon, model,
+               mae, rmse, n_train, n_test,
+               openmeteo_mae, openmeteo_rmse
+        FROM model_metrics
+        WHERE target = :target AND horizon = :horizon
+          AND (CAST(:model AS TEXT) IS NULL OR model = :model)
+        ORDER BY trained_at ASC
+        LIMIT :limit
+    """)
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        rows = (await session.execute(
+            sql,
+            {"target": target, "horizon": horizon, "model": model, "limit": limit},
+        )).all()
+    return {
+        "target": target,
+        "horizon": horizon,
+        "model": model,
+        "points": [
+            {
+                "trained_at": r.trained_at.isoformat(),
+                "model": r.model,
+                "mae": r.mae,
+                "rmse": r.rmse,
+                "n_train": r.n_train,
+                "n_test": r.n_test,
+                "openmeteo_mae": r.openmeteo_mae,
+                "openmeteo_rmse": r.openmeteo_rmse,
+            }
+            for r in rows
+        ],
+    }
 
 
 @app.get("/api/models")
