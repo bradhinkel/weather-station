@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from sqlalchemy import INTEGER, TEXT, Column, Float, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base
 
@@ -79,6 +79,37 @@ class ModelMetric(Base):
     n_test        = Column(INTEGER)
     openmeteo_mae  = Column(Float)
     openmeteo_rmse = Column(Float)
+
+
+class HeartbeatRun(Base):
+    """One row per data-sufficiency heartbeat run.
+
+    Phase 7.1 deliverable. Heartbeat mode answers 'are we getting enough
+    data, and is it good?' on a rolling window. The same metrics are reused
+    by the 7.3 gate-mode check at holdout lock.
+    """
+    __tablename__ = "heartbeat_runs"
+
+    run_time              = Column(TIMESTAMP(timezone=True), primary_key=True, nullable=False)
+    station_id            = Column(TEXT, primary_key=True, nullable=False)
+    window_days           = Column(INTEGER, primary_key=True, nullable=False)
+
+    obs_hours_covered     = Column(INTEGER)
+    obs_hours_expected    = Column(INTEGER)
+    obs_gap_pct           = Column(Float)
+    nwp_hours_covered     = Column(INTEGER)
+    nwp_hours_expected    = Column(INTEGER)
+    nwp_gap_pct           = Column(Float)
+
+    rain_positive_hours   = Column(INTEGER)
+    frontal_passage_hours = Column(INTEGER)
+    stable_period_hours   = Column(INTEGER)
+
+    # Network coverage stays NULL until WU/PWSWeather ingest lands later in 7.1.
+    network_coverage_pct  = Column(Float)
+
+    sensor_drift_flags    = Column(JSONB)
+    notes                 = Column(TEXT)
 
 
 # ---------------------------------------------------------------------------

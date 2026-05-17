@@ -314,6 +314,76 @@ async def metrics_history(
     }
 
 
+@app.get("/api/heartbeat/latest")
+async def heartbeat_latest(station_id: Optional[str] = None):
+    """Most recent heartbeat row for a station (or the first registered)."""
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        station = await _resolve_station(session, station_id)
+        row = (await session.execute(_sa_text("""
+            SELECT run_time, station_id, window_days,
+                   obs_hours_covered, obs_hours_expected, obs_gap_pct,
+                   nwp_hours_covered, nwp_hours_expected, nwp_gap_pct,
+                   rain_positive_hours, frontal_passage_hours, stable_period_hours,
+                   network_coverage_pct, sensor_drift_flags, notes
+            FROM heartbeat_runs
+            WHERE station_id = :sid
+            ORDER BY run_time DESC
+            LIMIT 1
+        """), {"sid": station.station_id})).one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No heartbeat runs yet for {station.station_id}",
+        )
+    return _heartbeat_row_to_dict(row)
+
+
+@app.get("/api/heartbeat")
+async def heartbeat_history(
+    station_id: Optional[str] = None,
+    days: int = Query(30, ge=1, le=365),
+):
+    """Heartbeat runs for a station over the past `days` days, oldest first."""
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        station = await _resolve_station(session, station_id)
+        rows = (await session.execute(_sa_text("""
+            SELECT run_time, station_id, window_days,
+                   obs_hours_covered, obs_hours_expected, obs_gap_pct,
+                   nwp_hours_covered, nwp_hours_expected, nwp_gap_pct,
+                   rain_positive_hours, frontal_passage_hours, stable_period_hours,
+                   network_coverage_pct, sensor_drift_flags, notes
+            FROM heartbeat_runs
+            WHERE station_id = :sid
+              AND run_time >= now() - make_interval(days => :days)
+            ORDER BY run_time ASC
+        """), {"sid": station.station_id, "days": days})).all()
+    return {
+        "station_id": station.station_id,
+        "days": days,
+        "runs": [_heartbeat_row_to_dict(r) for r in rows],
+    }
+
+
+def _heartbeat_row_to_dict(row) -> dict:
+    return {
+        "run_time": row.run_time.isoformat(),
+        "station_id": row.station_id,
+        "window_days": row.window_days,
+        "obs_hours_covered": row.obs_hours_covered,
+        "obs_hours_expected": row.obs_hours_expected,
+        "obs_gap_pct": row.obs_gap_pct,
+        "nwp_hours_covered": row.nwp_hours_covered,
+        "nwp_hours_expected": row.nwp_hours_expected,
+        "nwp_gap_pct": row.nwp_gap_pct,
+        "rain_positive_hours": row.rain_positive_hours,
+        "frontal_passage_hours": row.frontal_passage_hours,
+        "stable_period_hours": row.stable_period_hours,
+        "network_coverage_pct": row.network_coverage_pct,
+        "sensor_drift_flags": row.sensor_drift_flags,
+        "notes": row.notes,
+    }
+
+
 @app.get("/api/models")
 async def list_models():
     """Inventory of (target, horizon, model) bundles currently loadable."""

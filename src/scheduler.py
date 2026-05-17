@@ -10,6 +10,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import Station, Observation, engine
+from src.heartbeat import run_heartbeat
 from src.openmeteo import fetch_forecast
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,18 @@ async def cleanup_job() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Job 4 — data-sufficiency heartbeat (daily at 00:30 UTC)
+# ---------------------------------------------------------------------------
+
+async def heartbeat_job() -> None:
+    """Phase 7.1 data-sufficiency heartbeat over a rolling 30-day window."""
+    try:
+        await run_heartbeat()
+    except Exception:
+        logger.exception("heartbeat_job: failed.")
+
+
+# ---------------------------------------------------------------------------
 # Scheduler wiring
 # ---------------------------------------------------------------------------
 
@@ -132,6 +145,14 @@ def configure_scheduler() -> AsyncIOScheduler:
         cleanup_job,
         trigger=CronTrigger(hour=3, minute=0),
         id="cleanup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        heartbeat_job,
+        trigger=CronTrigger(hour=0, minute=30),
+        id="heartbeat",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,
