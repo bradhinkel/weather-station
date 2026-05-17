@@ -25,6 +25,7 @@ from src.database import Observation, Station, engine
 from src.pws.base import NetworkObservation, PWSSource, StationInfo
 from src.pws.distance import bearing_deg, destination_point, haversine_km
 from src.pws.registry import (
+    evaluate_quality,
     list_network_stations,
     mark_station_seen,
     upsert_network_station,
@@ -259,6 +260,26 @@ async def _cli_ingest(args) -> None:
 
 
 # --------------------------------------------------------------------------
+# evaluate-quality
+# --------------------------------------------------------------------------
+
+async def _cli_evaluate_quality(args) -> None:
+    summary = await evaluate_quality(
+        window_days=args.days,
+        min_coverage_pct=args.min_coverage,
+    )
+    print(
+        f"evaluate-quality (window={args.days}d, min_coverage={args.min_coverage}%):\n"
+        f"  stations:       {summary['total']:>4d}\n"
+        f"  active:         {summary['active']:>4d}  (rows > 0 in window)\n"
+        f"  blacklisted:    {summary['blacklisted']:>4d}  (coverage < {args.min_coverage}%)\n"
+        f"  has_pressure:   {summary['with_pressure']:>4d}\n"
+        f"  has_solar:      {summary['with_solar']:>4d}\n"
+        f"  has_rain_data:  {summary['with_rain_data']:>4d}"
+    )
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 
@@ -285,6 +306,12 @@ def main():
     p_ing.add_argument("--station-id", default=None,
                        help="single station; default = all registered for source")
     p_ing.set_defaults(func=_cli_ingest)
+
+    p_q = sub.add_parser("evaluate-quality", help="rescore quality_flags per station from recent obs")
+    p_q.add_argument("--days", type=int, default=7, help="evaluation window (default 7d)")
+    p_q.add_argument("--min-coverage", type=float, default=50.0,
+                     help="coverage %% below which a station is blacklisted (default 50)")
+    p_q.set_defaults(func=_cli_evaluate_quality)
 
     args = parser.parse_args()
     try:
