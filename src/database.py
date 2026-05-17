@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from sqlalchemy import INTEGER, TEXT, Column, Float, text
+from sqlalchemy import BOOLEAN, INTEGER, TEXT, Column, Float, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base
@@ -33,13 +33,22 @@ engine = create_async_engine(_build_dsn(), echo=False, future=True)
 class Station(Base):
     __tablename__ = "stations"
 
-    station_id  = Column(TEXT, primary_key=True)
-    name        = Column(TEXT)
-    lat         = Column(Float)
-    lon         = Column(Float)
-    elevation_m = Column(Float)
-    timezone    = Column(TEXT)
-    created_at  = Column(
+    station_id    = Column(TEXT, primary_key=True)
+    name          = Column(TEXT)
+    lat           = Column(Float)
+    lon           = Column(Float)
+    elevation_m   = Column(Float)
+    timezone      = Column(TEXT)
+    # Phase 7.1 network-source columns. is_network=False marks the own
+    # station (Ecowitt) and any future co-located comparison stations;
+    # network rows carry source/distance/bearing/quality info.
+    is_network    = Column(BOOLEAN, nullable=False, server_default=text("FALSE"))
+    source        = Column(TEXT, nullable=False, server_default=text("'ecowitt'"))
+    distance_km   = Column(Float)
+    bearing_deg   = Column(Float)
+    quality_flags = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    last_seen     = Column(TIMESTAMP(timezone=True))
+    created_at    = Column(
         TIMESTAMP(timezone=True),
         nullable=False,
         server_default=text("now()"),
@@ -63,6 +72,9 @@ class Observation(Base):
     solar_wm2           = Column(Float)
     uv_index            = Column(Float)
     feels_like_c        = Column(Float)
+    # Provider tag — 'ecowitt' for own-station obs, 'wu' / 'pwsweather' for
+    # network rows. Phase 7.1.
+    source              = Column(TEXT, nullable=False, server_default=text("'ecowitt'"))
 
 
 class ModelMetric(Base):
@@ -160,6 +172,28 @@ async def init_db() -> None:
         ))
         await conn.execute(text(
             "ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS precip_prob_pct INTEGER"
+        ))
+        # Phase 7.1 — network-source columns on stations + source tag on obs.
+        await conn.execute(text(
+            "ALTER TABLE stations ADD COLUMN IF NOT EXISTS is_network BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE stations ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'ecowitt'"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE stations ADD COLUMN IF NOT EXISTS distance_km FLOAT"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE stations ADD COLUMN IF NOT EXISTS bearing_deg FLOAT"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE stations ADD COLUMN IF NOT EXISTS quality_flags JSONB NOT NULL DEFAULT '{}'::jsonb"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE stations ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE observations ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'ecowitt'"
         ))
         logger.info("Schema migrations applied.")
 
