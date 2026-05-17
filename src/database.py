@@ -81,6 +81,29 @@ class ModelMetric(Base):
     openmeteo_rmse = Column(Float)
 
 
+class ExcludedWindow(Base):
+    """Time windows to exclude from train/val/holdout splits.
+
+    Phase 7.1 deliverable. Outages, sensor anomalies, and calibration periods
+    get a row here so the 7.2 feature pipeline and 7.3 gate check don't
+    silently include known-bad data. Heartbeat metrics stay raw — exclusion
+    is applied downstream by the data-consuming code.
+    """
+    __tablename__ = "excluded_windows"
+
+    id          = Column(INTEGER, primary_key=True, autoincrement=True)
+    station_id  = Column(TEXT, nullable=False)
+    start_time  = Column(TIMESTAMP(timezone=True), nullable=False)
+    end_time    = Column(TIMESTAMP(timezone=True), nullable=False)
+    reason      = Column(TEXT, nullable=False)
+    source      = Column(TEXT, nullable=False, server_default=text("'manual'"))
+    created_at  = Column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
 class HeartbeatRun(Base):
     """One row per data-sufficiency heartbeat run.
 
