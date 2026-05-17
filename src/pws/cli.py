@@ -22,7 +22,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import Observation, Station, engine
-from src.pws.base import NetworkObservation, PWSSource
+from src.pws.base import NetworkObservation, PWSSource, StationInfo
+from src.pws.distance import bearing_deg, destination_point, haversine_km
 from src.pws.registry import (
     list_network_stations,
     mark_station_seen,
@@ -89,24 +90,103 @@ async def _cli_list(args) -> None:
 # discover
 # --------------------------------------------------------------------------
 
+# Grid for the --wide sweep. WU's /v3/location/near returns its top-N
+# nearest to a single origin, which in urban areas collapses to a sub-km
+# cluster. Querying from a ring of synthetic origins gives access to
+# stations that would otherwise be invisible.
+_WIDE_RINGS_KM = (5.0, 20.0, 50.0, 90.0)
+_WIDE_BEARINGS_DEG = tuple(range(0, 360, 45))  # 8 compass points
+
+
+async def _discover_wide(
+    src: PWSSource,
+    home_lat: float,
+    home_lon: float,
+    radius_km: float,
+) -> list[StationInfo]:
+    """Grid sweep that calls discover_stations from multiple origins, then
+    re-grounds each station's distance/bearing to TRUE home and filters to
+    `radius_km` of home (not of the query origin).
+    """
+    origins: list[tuple[float, float]] = [(home_lat, home_lon)]
+    for ring in _WIDE_RINGS_KM:
+        for brg in _WIDE_BEARINGS_DEG:
+            origins.append(destination_point(home_lat, home_lon, ring, brg))
+
+    seen: dict[str, StationInfo] = {}
+    for i, (lat, lon) in enumerate(origins, start=1):
+        try:
+            results = await src.discover_stations(lat, lon, radius_km * 2)
+        except Exception:
+            logger.exception("discover-wide: origin (%.4f, %.4f) failed", lat, lon)
+            results = []
+        new = 0
+        for info in results:
+            if info.station_id in seen:
+                continue
+            info.distance_km = haversine_km(home_lat, home_lon, info.lat, info.lon)
+            info.bearing_deg = bearing_deg(home_lat, home_lon, info.lat, info.lon)
+            seen[info.station_id] = info
+            new += 1
+        logger.info(
+            "discover-wide: %2d/%d origin=(%.3f, %.3f) +%d new (total %d)",
+            i, len(origins), lat, lon, new, len(seen),
+        )
+        await asyncio.sleep(0.1)  # gentle pacing; WU rate budget is fine here
+
+    return [s for s in seen.values() if s.distance_km is not None and s.distance_km <= radius_km]
+
+
+def _coverage_summary(stations: list[StationInfo]) -> None:
+    """Print station counts per distance band and per bearing octant. Cheap
+    diagnostic for whether grid coverage is sufficient for Q3/Q4 sweeps.
+    """
+    bands = [(0, 10), (10, 25), (25, 50), (50, 100)]
+    octants = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+    print("\ncoverage by distance band:")
+    for lo, hi in bands:
+        n = sum(1 for s in stations if s.distance_km is not None and lo <= s.distance_km < hi)
+        print(f"  {lo:>3}–{hi:<3} km   {n:>4}")
+
+    print("\ncoverage by bearing octant (centered on cardinal/intercardinal):")
+    for i, name in enumerate(octants):
+        center = i * 45.0
+        lo = (center - 22.5) % 360.0
+        hi = (center + 22.5) % 360.0
+        if lo > hi:  # wraps through 360°
+            n = sum(1 for s in stations if s.bearing_deg is not None and (s.bearing_deg >= lo or s.bearing_deg < hi))
+        else:
+            n = sum(1 for s in stations if s.bearing_deg is not None and lo <= s.bearing_deg < hi)
+        print(f"  {name:<2}   {n:>4}")
+
+
 async def _cli_discover(args) -> None:
     src = _build_source(args.source)
     home_lat, home_lon = await _resolve_home()
-    logger.info("discover: source=%s home=(%.4f, %.4f) radius=%.0fkm",
-                src.name, home_lat, home_lon, args.radius)
+    mode = "wide" if args.wide else "near"
+    logger.info(
+        "discover: source=%s mode=%s home=(%.4f, %.4f) radius=%.0fkm",
+        src.name, mode, home_lat, home_lon, args.radius,
+    )
 
-    stations = await src.discover_stations(home_lat, home_lon, args.radius)
-    logger.info("discover: %d stations returned within %.0fkm", len(stations), args.radius)
+    if args.wide:
+        stations = await _discover_wide(src, home_lat, home_lon, args.radius)
+    else:
+        stations = await src.discover_stations(home_lat, home_lon, args.radius)
+    logger.info("discover: %d unique stations within %.0fkm of home", len(stations), args.radius)
 
     if args.dry_run:
-        for info in stations:
+        for info in sorted(stations, key=lambda s: s.distance_km or 0):
             print(f"{info.station_id:<20}  {info.distance_km:>6.1f}km  "
                   f"{info.bearing_deg:>5.0f}°  {info.name or ''}")
+        _coverage_summary(stations)
         return
 
     for info in stations:
         await upsert_network_station(info)
     logger.info("discover: upserted %d stations into registry", len(stations))
+    _coverage_summary(stations)
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +274,8 @@ def main():
     p_disc = sub.add_parser("discover", help="enumerate provider stations + upsert registry")
     p_disc.add_argument("--source", default="wu", choices=["wu"])
     p_disc.add_argument("--radius", type=float, default=100.0, help="km from own station")
+    p_disc.add_argument("--wide", action="store_true",
+                        help="grid-sweep multiple origins; needed because WU's /near caps to ~10")
     p_disc.add_argument("--dry-run", action="store_true", help="print, don't write")
     p_disc.set_defaults(func=_cli_discover)
 

@@ -9,12 +9,13 @@ Provides:
 """
 
 from src.pws.base import NetworkObservation, PWSSource, StationInfo
-from src.pws.distance import bearing_deg, haversine_km
+from src.pws.distance import bearing_deg, destination_point, haversine_km
 
 __all__ = [
     "NetworkObservation",
     "PWSSource",
     "StationInfo",
     "bearing_deg",
+    "destination_point",
     "haversine_km",
 ]
