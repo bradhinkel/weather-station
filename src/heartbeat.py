@@ -279,7 +279,14 @@ async def run_heartbeat(
     """
     async with AsyncSession(engine, expire_on_commit=False) as session:
         if station_id is None:
-            stations = (await session.execute(select(Station))).scalars().all()
+            # Heartbeat reports on own-station data sufficiency (NWP coverage,
+            # frontal passages, etc.). Network stations are summarized via
+            # network_coverage_pct on the own-station row, not their own rows.
+            stations = (
+                await session.execute(
+                    select(Station).where(Station.is_network.is_(False))
+                )
+            ).scalars().all()
         else:
             stations = (
                 await session.execute(
