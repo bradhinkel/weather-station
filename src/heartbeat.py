@@ -113,6 +113,28 @@ WHERE station_id = :sid
 """)
 
 
+# Network coverage = realized station-hours / expected station-hours, where
+# expected = (count of non-blacklisted network stations) × (window hours).
+# Stations without an evaluate_quality stamp are excluded from the denominator
+# so the metric doesn't get diluted by stations that may not be usable.
+_NETWORK_COVERAGE_SQL = text("""\
+WITH usable AS (
+    SELECT station_id
+    FROM stations
+    WHERE is_network = true
+      AND quality_flags->>'blacklisted' = 'false'
+)
+SELECT
+    (SELECT count(*) FROM usable)::int                              AS station_count,
+    (
+        SELECT count(*)::int FROM observations o
+        JOIN usable u USING (station_id)
+        WHERE time >= now() - make_interval(days => :days)
+          AND time <  now()
+    )                                                                AS row_count
+""")
+
+
 # Regime detection: bucket to hourly means (circular for wind direction via
 # sin/cos averaging), then look at the 6-hour change. Front = wind veers > 60°
 # AND pressure falls > 2 hPa. Stable = wind drift < 30° AND |Δp| < 0.5 hPa.
@@ -206,6 +228,9 @@ async def compute_heartbeat(
             },
         )
     ).one()
+    net_row = (
+        await session.execute(_NETWORK_COVERAGE_SQL, {"days": window_days})
+    ).one()
 
     obs_expected = obs_row.expected or 0
     obs_covered = obs_row.covered or 0
@@ -221,6 +246,15 @@ async def compute_heartbeat(
         if nwp_expected else 0.0
     )
 
+    net_stations = net_row.station_count or 0
+    net_rows = net_row.row_count or 0
+    net_expected = net_stations * window_days * 24
+    network_coverage_pct: Optional[float]
+    if net_expected:
+        network_coverage_pct = round(100.0 * net_rows / net_expected, 2)
+    else:
+        network_coverage_pct = None  # no usable network stations yet
+
     return HeartbeatReport(
         run_time=datetime.now(timezone.utc),
         station_id=station_id,
@@ -234,7 +268,7 @@ async def compute_heartbeat(
         rain_positive_hours=rain_row.rain_hours or 0,
         frontal_passage_hours=regime_row.frontal_hours or 0,
         stable_period_hours=regime_row.stable_hours or 0,
-        network_coverage_pct=None,  # filled once WU/PWSWeather ingest lands
+        network_coverage_pct=network_coverage_pct,
         sensor_drift_flags={},      # finalized later in 7.1 calibration
         notes=None,
     )

@@ -14,20 +14,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database import Observation, Station, engine
-from src.pws.base import NetworkObservation, PWSSource, StationInfo
+from src.database import Station, engine
+from src.pws.base import PWSSource, StationInfo
 from src.pws.distance import bearing_deg, destination_point, haversine_km
+from src.pws.ingest import ingest_recent
 from src.pws.registry import (
     evaluate_quality,
     list_network_stations,
-    mark_station_seen,
     upsert_network_station,
 )
 from src.pws.wu import WUKeyMissing, WUSource
@@ -194,69 +191,19 @@ async def _cli_discover(args) -> None:
 # ingest
 # --------------------------------------------------------------------------
 
-async def _persist_observations(rows: list[NetworkObservation]) -> int:
-    """Bulk-upsert into observations table. Returns count of rows attempted.
-
-    Uses ON CONFLICT DO NOTHING on (time, station_id) — the existing PK.
-    Network rows that collide with prior fetches are silently skipped, which
-    matches the WU hourly cadence (same hour-bucket = same row).
-    """
-    if not rows:
-        return 0
-    payload = [
-        {
-            "time": r.time,
-            "station_id": r.station_id,
-            "temp_c": r.temp_c,
-            "humidity_pct": r.humidity_pct,
-            "pressure_hpa": r.pressure_hpa,
-            "wind_speed_ms": r.wind_speed_ms,
-            "wind_dir_deg": r.wind_dir_deg,
-            "wind_gust_ms": r.wind_gust_ms,
-            "rain_mm_1h": r.rain_mm_1h,
-            "rain_rate_mm_hr": r.rain_rate_mm_hr,
-            "solar_wm2": r.solar_wm2,
-            "uv_index": r.uv_index,
-            "source": r.source,
-        }
-        for r in rows
-    ]
-    stmt = pg_insert(Observation).values(payload).on_conflict_do_nothing(
-        index_elements=["time", "station_id"],
-    )
-    async with AsyncSession(engine, expire_on_commit=False) as session:
-        async with session.begin():
-            await session.execute(stmt)
-    return len(payload)
-
-
 async def _cli_ingest(args) -> None:
     src = _build_source(args.source)
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=args.hours)
-
-    if args.station_id:
-        targets = [args.station_id]
-    else:
-        rows = await list_network_stations(source=src.name)
-        targets = [s.station_id for s in rows]
-        if not targets:
-            raise RuntimeError(
-                f"no registered {src.name!r} stations to ingest from — run `discover` first."
-            )
-
-    total = 0
-    for sid in targets:
-        try:
-            obs = await src.fetch_observations(sid, start, end)
-        except Exception:
-            logger.exception("ingest: station=%s failed", sid)
-            continue
-        n = await _persist_observations(obs)
-        await mark_station_seen(sid)
-        logger.info("ingest: station=%s rows=%d", sid, n)
-        total += n
-    logger.info("ingest: %d total rows across %d stations", total, len(targets))
+    targets = [args.station_id] if args.station_id else None
+    summary = await ingest_recent(
+        src,
+        hours=args.hours,
+        only_active=not args.all,
+        station_ids=targets,
+    )
+    print(
+        f"ingest: source={src.name} stations={summary['stations']} "
+        f"rows={summary['rows']} failures={summary['failures']}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -304,7 +251,9 @@ def main():
     p_ing.add_argument("--source", default="wu", choices=["wu"])
     p_ing.add_argument("--hours", type=int, default=24)
     p_ing.add_argument("--station-id", default=None,
-                       help="single station; default = all registered for source")
+                       help="single station; default = all active registered for source")
+    p_ing.add_argument("--all", action="store_true",
+                       help="include blacklisted/unevaluated stations (default: only quality_flags->>'blacklisted' = 'false')")
     p_ing.set_defaults(func=_cli_ingest)
 
     p_q = sub.add_parser("evaluate-quality", help="rescore quality_flags per station from recent obs")

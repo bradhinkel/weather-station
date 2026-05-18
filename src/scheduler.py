@@ -12,6 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.database import Station, Observation, engine
 from src.heartbeat import run_heartbeat
 from src.openmeteo import fetch_forecast
+from src.pws.ingest import ingest_recent
+from src.pws.registry import evaluate_quality
+from src.pws.wu import WUKeyMissing, WUSource
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +111,41 @@ async def cleanup_job() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Job 4 — data-sufficiency heartbeat (daily at 00:30 UTC)
+# Job 4 — WU network ingest + quality rescore (daily at 00:15 UTC)
+# ---------------------------------------------------------------------------
+
+# WU /hourly/7day returns up to 7 days, so a daily run with hours=30 backfills
+# any gap from a missed run + the new day. ON CONFLICT DO NOTHING dedups.
+_WU_INGEST_HOURS = 30
+_QUALITY_WINDOW_DAYS = 7
+
+
+async def wu_ingest_job() -> None:
+    """Daily WU pull, then re-score quality_flags so blacklists stay current."""
+    try:
+        src = WUSource()
+    except WUKeyMissing:
+        logger.warning("wu_ingest_job: WU_API_KEY not set — skipping.")
+        return
+
+    try:
+        summary = await ingest_recent(src, hours=_WU_INGEST_HOURS, only_active=True)
+        logger.info(
+            "wu_ingest_job: stations=%d rows=%d failures=%d",
+            summary["stations"], summary["rows"], summary["failures"],
+        )
+    except Exception:
+        logger.exception("wu_ingest_job: ingest failed.")
+        return
+
+    try:
+        await evaluate_quality(window_days=_QUALITY_WINDOW_DAYS)
+    except Exception:
+        logger.exception("wu_ingest_job: quality rescore failed.")
+
+
+# ---------------------------------------------------------------------------
+# Job 5 — data-sufficiency heartbeat (daily at 00:30 UTC)
 # ---------------------------------------------------------------------------
 
 async def heartbeat_job() -> None:
@@ -145,6 +182,14 @@ def configure_scheduler() -> AsyncIOScheduler:
         cleanup_job,
         trigger=CronTrigger(hour=3, minute=0),
         id="cleanup",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        wu_ingest_job,
+        trigger=CronTrigger(hour=0, minute=15),
+        id="wu_ingest",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,
