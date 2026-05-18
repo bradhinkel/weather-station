@@ -1,6 +1,6 @@
 # Phase 7 Pre-Registration
 
-> **Status:** DRAFT — fields marked `<TBD>` are filled before 7.4 begins and the document is committed and tagged. Once committed, this file is **frozen** for the duration of the ablation campaign. Any change requires an amendment (see §10).
+> **Status:** PARTIAL DRAFT — sections describing the **feature pipeline as built in 7.1/7.2** are filled in. Fields that depend on the locked-snapshot (holdout window, frontal/stable episode lists, registered git SHA, station count at registration) remain `<TBD>` until coverage stabilizes >= 95% (projected ~2026-06-17) and the snapshot is taken at the start of 7.3. Once those fields are filled and the document is committed + tagged `phase7-prereg-v1`, this file is **frozen** for the duration of the ablation campaign. Any change requires an amendment (see §10).
 
 - **Author:** Brad Hinkel
 - **Project:** Hyperlocal Weather Forecasting — Phase 7 (PWS Network Layer)
@@ -30,11 +30,14 @@ The baseline is **not** retrained during 7.4. Ablations only change feature inpu
 
 ## 3. Data
 
-- **Own-station source:** Ecowitt → TimescaleDB (production).
-- **Network sources:** Weather Underground (primary), PWSWeather (fallback).
-- **Network station count at registration:** `<TBD: N>` stations within 100 km after quality filtering.
-- **Quality filters applied:** `<TBD: uptime ≥X%, drift detector vY, blacklist of M stations>`.
-- **Backfill coverage:** `<TBD: window covered, fraction available>`.
+- **Own-station source:** Ecowitt → TimescaleDB (production). One station, sheltered position — empirically measured wind-direction bias of **-37° CCW** vs the regional network mean (validated 2026-05-18 at wind ≥ 1 m/s, std 7°). Own wind-speed agrees with network within noise (own/network ratio 0.96 median). Per [`PHASE_7_PLAN.md`](../PHASE_7_PLAN.md) the default `FeatureConfig.wind_reference = "network_mean"` to avoid baking this shelter rotation into the upwind/downwind classification.
+- **Network sources:** Weather Underground (primary, live), PWSWeather (fallback, planned).
+- **Network station count at registration:** `<TBD: locked at registration; as of 2026-05-18 the registry has 246 quality stations within 100km>`.
+- **Quality filters applied:**
+  - `evaluate-quality` per station against `observations`: a station is non-blacklisted if `coverage_<window>d_pct ≥ 50` over the last 7 days.
+  - Network row filter at feature-time: `quality_flags->>'blacklisted' = 'false'` (explicit non-blacklist; unevaluated stations excluded).
+  - Excluded-windows registry (`excluded_windows` table) for two known own-station outages: 2026-04-22 → 2026-05-01 (Windows-docker autostart failure, resolved by droplet migration 2026-05-07) and 2026-05-07 (cutover window). Holdout candidate windows must not overlap these.
+- **Backfill coverage:** WU `/hourly/7day` endpoint backfills ~7 days per call; daily ingest job at 00:15 UTC continuously extends the live window. **Network-coverage trajectory:** 25% as of 2026-05-18, projected ~95% by 2026-06-17. Pre-registration locks once coverage stabilizes ≥ 95% with < 5% gap over a 30-day window (heartbeat exit criterion from `PHASE_7_PLAN.md` §7.1).
 
 ## 4. Holdout
 
@@ -75,17 +78,41 @@ Each row states the predicted direction and the threshold that counts as "the hy
 
 ## 7. Ablation matrix
 
-| Run ID | Q | Config | Notes |
-|--------|---|--------|-------|
-| A01 | Q1 | upwind + baseline, default N=5, ±30°, 10–50 km | Headline result |
-| A02–A06 | Q2 | sweep N ∈ {1, 3, 5, 10, 20} | Hold band and tolerance fixed |
-| A07–A10 | Q3 | distance bands {0–10, 10–25, 25–50, 50–100} alone | Hold N and tolerance fixed |
-| A11–A13 | Q3 | combined band variants `<TBD: enumerate>` | |
-| A14–A17 | Q4 | tolerance ∈ {±15°, ±30°, ±45°, ±90°} | Hold N and band fixed |
-| A18–A19 | Q5 | downwind-only; upwind + downwind | |
-| A20 | Q6 | winning Q1/Q2/Q3/Q4 config evaluated at all 5 horizons | No new training |
-| A21 | Q7 | winning config, stratified by regime | No new training |
-| A22 | Q8 | winning config, stratified by incoming wind sector | No new training |
+### 7.0 Headline config (the FeatureConfig literal used by A01)
+
+A01 fixes the following `src.features.config.FeatureConfig` values, which serve
+as the baseline against which subsequent ablation rows vary one knob at a time.
+Sweeps in Q2–Q4 inherit every other field from this row.
+
+| Knob | Value | Notes |
+|------|-------|-------|
+| `n_stations` | 5 | Q2 sweeps over {1, 3, 5, 10, 20}. |
+| `distance_band_km` | (0, 25) | Q3 sweeps. |
+| `angular_tolerance_deg` | 30 | Q4 sweeps. |
+| `include_downwind` | False | Q5 toggles. |
+| `lag_hours` | (1, 3, 6, 12) | Fixed across ablations; Q6 uses these as horizons. |
+| `wind_reference` | "network_mean" | Verified shelter; "own" available as Q4-adjacent ablation. |
+| `wind_reference_radius_km` | 10 | "Kirkland-local" — 25km variant tested only if 10km mean and 25km mean diverge >20° on the locked snapshot. |
+| `wind_reference_min_stations` | 5 | Fallback to "own" below this count. |
+| `aggregation_kernel` | "inverse_distance" | Gaussian variant deferred to post-7.4 if Q1 passes. |
+| `gaussian_sigma_km` | 5.0 | Unused unless kernel switched. |
+| `gradient_near_band_km` | (0, 10) | Spatial-gradient near band. |
+| `gradient_far_band_km` | (25, 50) | Spatial-gradient far band. |
+
+### 7.1 Runs
+
+| Run ID | Q | Config delta vs §7.0 | Notes |
+|--------|---|----------------------|-------|
+| A01 | Q1 | none — exact §7.0 config | **Headline result** |
+| A02–A06 | Q2 | `n_stations ∈ {1, 3, 5, 10, 20}` | A04 == A01 |
+| A07–A10 | Q3 | `distance_band_km ∈ {(0,10), (10,25), (25,50), (50,100)}` | Single-band alone |
+| A11–A13 | Q3 | `distance_band_km ∈ {(0,50), (0,100), (10,100)}` | Combined-band variants |
+| A14–A17 | Q4 | `angular_tolerance_deg ∈ {15, 30, 45, 90}` | A15 == A01 |
+| A18 | Q5 | downwind-only — implemented by inverting `direction_class` post-binning, see §10 amendment notes | |
+| A19 | Q5 | `include_downwind=True` | Upwind + downwind |
+| A20 | Q6 | winning §7.1 config evaluated at all 5 horizons | No new training |
+| A21 | Q7 | winning config, stratified by regime label (frontal / stable / other) | No new training |
+| A22 | Q8 | winning config, stratified by incoming wind sector (8 octants) | No new training |
 
 **Run order:** A01 first (headline), then Q2 → Q3 → Q4 sweeps, then Q5, then Q6–Q8 stratifications on the chosen winner. **Run order does not change** based on intermediate results.
 
