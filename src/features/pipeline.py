@@ -26,6 +26,7 @@ load_dotenv()
 from src.features.aggregation import kernel_weights, weighted_mean
 from src.features.bearing import direction_class
 from src.features.config import FeatureConfig
+from src.features.gradient import GRADIENT_FIELDS, compute_upwind_gradient
 from src.features.lags import slice_at_lag
 from src.features.wind_reference import resolve_wind_reference
 
@@ -233,18 +234,30 @@ def build_features(
             continue
 
         for lag in (0, *config.lag_hours):
+            lag_hour = pd.Timestamp(t) - pd.Timedelta(hours=lag)
+
+            # Cohort aggregate: the top-N upwind stations in the configured
+            # distance band, weighted-mean per field.
             sub = slice_at_lag(net_obs, t, lag, cand_ids)
             if sub.empty:
                 for f in _AGGREGATE_FIELDS:
                     row[f"upwind_{f}_lag{lag}h"] = None
-                continue
-            w = kernel_weights(
-                sub["distance_km"].tolist(),
-                kernel=config.aggregation_kernel,
-                gaussian_sigma_km=config.gaussian_sigma_km,
-            )
-            for f in _AGGREGATE_FIELDS:
-                row[f"upwind_{f}_lag{lag}h"] = weighted_mean(sub[f].values, w)
+            else:
+                w = kernel_weights(
+                    sub["distance_km"].tolist(),
+                    kernel=config.aggregation_kernel,
+                    gaussian_sigma_km=config.gaussian_sigma_km,
+                )
+                for f in _AGGREGATE_FIELDS:
+                    row[f"upwind_{f}_lag{lag}h"] = weighted_mean(sub[f].values, w)
+
+            # Spatial gradient: uses ALL upwind stations in the gradient
+            # bands (not restricted to the cohort), so we pull the full
+            # hour slice, not slice_at_lag's cohort-restricted view.
+            hour_slice = net_obs[net_obs["time_hour"] == lag_hour]
+            grad = compute_upwind_gradient(hour_slice, wind_ref, config)
+            for f, v in grad.items():
+                row[f"upwind_{f}_gradient_lag{lag}h"] = v
 
         rows.append(row)
 
@@ -253,8 +266,10 @@ def build_features(
 
 
 def _fill_nan_features(row: dict, config: FeatureConfig) -> dict:
-    """Fill all upwind_<field>_lag<H>h slots with None for skipped hours."""
+    """Fill all upwind_*_lag<H>h slots with None for hours with no wind ref."""
     for lag in (0, *config.lag_hours):
         for f in _AGGREGATE_FIELDS:
             row[f"upwind_{f}_lag{lag}h"] = None
+        for f in GRADIENT_FIELDS:
+            row[f"upwind_{f}_gradient_lag{lag}h"] = None
     return row

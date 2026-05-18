@@ -60,6 +60,13 @@ class FeatureConfig:
     # Sigma for Gaussian kernel (km). Used only when kernel == "gaussian".
     gaussian_sigma_km: float = 5.0
 
+    # Spatial-gradient feature bands along the upwind axis. Gradient is
+    # weighted_mean(far_band) - weighted_mean(near_band). Bands must NOT
+    # overlap (validated below). Defaults pick "immediate upwind" vs
+    # "regional upwind" — sensitive to advection on the 25–50km scale.
+    gradient_near_band_km: tuple[float, float] = (0.0, 10.0)
+    gradient_far_band_km: tuple[float, float] = (25.0, 50.0)
+
     def __post_init__(self) -> None:
         if not (0.0 < self.angular_tolerance_deg <= 90.0):
             raise ValueError(
@@ -83,4 +90,18 @@ class FeatureConfig:
         if self.gaussian_sigma_km <= 0:
             raise ValueError(
                 f"gaussian_sigma_km must be > 0, got {self.gaussian_sigma_km}"
+            )
+        n_lo, n_hi = self.gradient_near_band_km
+        f_lo, f_hi = self.gradient_far_band_km
+        if not (0.0 <= n_lo < n_hi):
+            raise ValueError(
+                f"gradient_near_band_km must satisfy 0 <= low < high, got {self.gradient_near_band_km}"
+            )
+        if not (0.0 <= f_lo < f_hi):
+            raise ValueError(
+                f"gradient_far_band_km must satisfy 0 <= low < high, got {self.gradient_far_band_km}"
+            )
+        if n_hi > f_lo:
+            raise ValueError(
+                f"gradient bands must not overlap (near ends at {n_hi}, far starts at {f_lo})"
             )
