@@ -16,7 +16,12 @@ from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 import pandas as pd
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+
+# Load .env at import time so the sync DSN below can read DB_* without the
+# caller needing to source .env. Matches src/database.py and src/ml/dataset.py.
+load_dotenv()
 
 from src.features.aggregation import kernel_weights, weighted_mean
 from src.features.bearing import direction_class
