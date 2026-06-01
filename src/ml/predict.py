@@ -61,6 +61,7 @@ SELECT
     avg(humidity_pct)  AS humidity_pct,
     avg(pressure_hpa)  AS pressure_hpa,
     avg(wind_speed_ms) AS wind_speed_ms,
+    max(rain_mm_1h)          AS rain_1h_reported,
     max(rain_mm_daily_total) AS daily_total_end
 FROM observations
 WHERE station_id = :sid
@@ -160,8 +161,12 @@ def _build_feature_dict(
     prev_lag_daily_total: Optional[float],
 ) -> dict[str, float]:
     """Mirror the feature engineering in src.ml.dataset for one row."""
+    # Match dataset.py: prefer the station-reported trailing-hour accumulation,
+    # fall back to the daily-total delta only when it's missing.
     lag_rain = 0.0
-    if lag_row.daily_total_end is not None and prev_lag_daily_total is not None:
+    if lag_row.rain_1h_reported is not None:
+        lag_rain = float(lag_row.rain_1h_reported)
+    elif lag_row.daily_total_end is not None and prev_lag_daily_total is not None:
         d = float(lag_row.daily_total_end) - float(prev_lag_daily_total)
         lag_rain = d if d >= 0 else float(lag_row.daily_total_end)
 

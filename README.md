@@ -30,9 +30,17 @@ expected curve, and seeing it bend is part of the point. The +3 h row sits
 exactly in between, as data thinning would predict. A `model_metrics` table
 appends a row on every retrain so this curve becomes a time-series.
 
-Rain target is structurally wired but unfit to train: zero non-zero rain in
-the training window. It will become useful once a few weeks of mixed weather
-have passed; the path is a 2-stage classifier-then-regressor.
+Rain target is now trainable. The earlier "no rain to train on" blocker was
+actually a dataset bug: the builder derived the hourly rain target purely from
+`rain_mm_daily_total` deltas, which the network (WU) stations never populate and
+which recovered only a fraction of the own station's rain — so `build_dataset`
+returned a single non-zero sample. It now prefers the station-reported
+`rain_mm_1h` column (both sources populate it), falling back to the daily-total
+delta only when that's missing, which surfaces ~11k positive samples per
+horizon. Caveat: rain is zero-inflated, so MAE flatters a near-zero predictor —
+treat the single-stage regressor here as a pipeline-shakedown, not a skilled
+rain forecast. The next step toward real skill is the 2-stage
+classifier-then-regressor, judged on rain/no-rain precision/recall.
 
 ## Architecture
 

@@ -52,6 +52,7 @@ WITH obs_hourly AS (
         avg(pressure_hpa)  AS pressure_hpa,
         avg(wind_speed_ms) AS wind_speed_ms,
         avg(wind_dir_deg)  AS wind_dir_deg,
+        max(rain_mm_1h)          AS rain_1h_reported,
         max(rain_mm_daily_total) AS daily_total_end
     FROM observations
     WHERE (CAST(:sid AS TEXT) IS NULL OR station_id = :sid)
@@ -61,13 +62,21 @@ obs_with_rain AS (
     SELECT
         station_id, hour,
         temp_c, humidity_pct, pressure_hpa, wind_speed_ms, wind_dir_deg,
-        CASE
-            WHEN LAG(daily_total_end) OVER w IS NULL
-                THEN NULL
-            WHEN daily_total_end >= LAG(daily_total_end) OVER w
-                THEN daily_total_end - LAG(daily_total_end) OVER w
-            ELSE daily_total_end
-        END AS rain_mm_1h
+        -- Prefer the station-reported trailing-hour accumulation (rain_mm_1h):
+        -- both Ecowitt and the network (WU) sources populate it, whereas
+        -- rain_mm_daily_total is Ecowitt-only and updates too sparsely to
+        -- recover light rain via hourly deltas. Fall back to the daily-total
+        -- delta only when the reported hourly value is missing.
+        COALESCE(
+            rain_1h_reported,
+            CASE
+                WHEN LAG(daily_total_end) OVER w IS NULL
+                    THEN NULL
+                WHEN daily_total_end >= LAG(daily_total_end) OVER w
+                    THEN daily_total_end - LAG(daily_total_end) OVER w
+                ELSE daily_total_end
+            END
+        ) AS rain_mm_1h
     FROM obs_hourly
     WINDOW w AS (PARTITION BY station_id ORDER BY hour)
 ),
