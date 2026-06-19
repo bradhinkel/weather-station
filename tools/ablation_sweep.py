@@ -53,7 +53,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from src.features.config import FeatureConfig
 from src.features.pipeline import (
@@ -180,12 +180,17 @@ def _merge_network(
     for c in cols:
         merged[c] = lookup[c].to_numpy()
 
-    present_col = f"net_present{suffix}"
+    # Presence/count are real values when the cohort is empty (0 stations), so
+    # fill them with 0. The upwind_* VALUE columns are left NaN here and
+    # train-mean-imputed after the split (run_config) — filling them with 0
+    # would drop a 0 hPa / 0 °C sentinel next to ~1015 hPa real values and blow
+    # up StandardScaler/Ridge on any train/test coverage shift.
     n_up_col = f"n_upwind{suffix}"
+    present_col = f"net_present{suffix}"
     if n_up_col in merged.columns:
-        merged[present_col] = (merged[n_up_col].fillna(0) > 0).astype(float)
+        merged[n_up_col] = merged[n_up_col].fillna(0.0)
+        merged[present_col] = (merged[n_up_col] > 0).astype(float)
         cols.append(present_col)
-    merged[cols] = merged[cols].fillna(0.0)
     return merged, cols
 
 
@@ -258,6 +263,14 @@ def run_config(
 
     merged = merged.dropna(subset=base_cols + ["y"]).reset_index(drop=True)
     train_df, test_df = temporal_split(merged)
+
+    # Leak-free imputation of absent-cohort network values: fit column means on
+    # train only, apply to both. (temporal_split already returns copies.)
+    val_cols = [c for c in net_cols if c.startswith("upwind_")]
+    if val_cols:
+        means = train_df[val_cols].mean()
+        train_df[val_cols] = train_df[val_cols].fillna(means).fillna(0.0)
+        test_df[val_cols] = test_df[val_cols].fillna(means).fillna(0.0)
 
     y_tr = train_df["y"].to_numpy(float)
     y_te = test_df["y"].to_numpy(float)
@@ -357,8 +370,24 @@ def main():
     engine = create_engine(_sync_dsn())
     try:
         home_id = _resolve_home_station(_load_stations(engine))
+        with engine.connect() as conn:
+            max_net = conn.execute(text(
+                "SELECT max(time) FROM observations WHERE source <> 'ecowitt'"
+            )).scalar()
     finally:
         engine.dispose()
+
+    # Clip the eval window to where network data actually exists. The daily WU
+    # batch lags ~a day, so 'now' has empty upwind cohorts that would land only
+    # in the (most-recent) test split and skew it with imputed rows.
+    if max_net is not None:
+        max_net = pd.Timestamp(max_net)
+        max_net = max_net.tz_localize("UTC") if max_net.tzinfo is None else max_net
+        clip = (max_net + pd.Timedelta(hours=1)).to_pydatetime()
+        if clip < window_end:
+            logger.info("clip window_end %s -> %s (last network obs)",
+                        window_end, clip)
+            window_end = clip
     logger.info("home station=%s window=%s -> %s", home_id,
                 window_start.date(), window_end.date())
 
