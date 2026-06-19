@@ -172,9 +172,11 @@ def _merge_network(
     net_r.columns = [f"{c}{suffix}" for c in cols]
     cols = list(net_r.columns)
 
-    feature_time = base["valid_time"] - pd.Timedelta(hours=horizon)
+    # tz-aware DatetimeIndex (NOT .values, which strips the tz and makes every
+    # lookup miss the tz-aware net index -> all-NaN -> dead network features).
+    feature_time = pd.DatetimeIndex(base["valid_time"] - pd.Timedelta(hours=horizon))
     merged = base.copy()
-    lookup = net_r.reindex(feature_time.values)
+    lookup = net_r.reindex(feature_time)
     for c in cols:
         merged[c] = lookup[c].to_numpy()
 
