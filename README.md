@@ -152,6 +152,12 @@ two unrelated sites. Conventions:
 | Random Forest with confidence bands | with the trees milestone |
 | LSTM experiment (intentionally under-data) | target ~2026-11-01 |
 
+**Reproducing the neighbor-station sweep** (Phase 7.4) — how many nearby
+stations, at what distances, improve the +1/+3/+24h forecast — is documented in
+[`experiments/running_the_sweep.md`](experiments/running_the_sweep.md). It is
+location-independent: register your own station, discover the network around
+*its* coordinates, and the sweep finds the best mix for *your* microclimate.
+
 This is a personal project, intentionally small and slow-paced. The modeling
 timeline is deliberately conservative — watch the `model_metrics` time-series
 to see how the bias narrows as data accumulates.
