@@ -12,7 +12,13 @@ The whole point is to **measure how a backyard microclimate diverges from the
 regional forecast** — the biases are the signal, not noise — and to track how
 much of that gap a small ML model can recover as data accumulates.
 
-## Live results (Seattle backyard, retrained 2026-05-07)
+## Live results (Seattle backyard)
+
+> The table below is the **first published window** (retrained 2026-05-07), kept
+> as an illustrative snapshot of the expected error-vs-horizon curve. **Current
+> numbers are live on [weather.bradhinkel.com](https://weather.bradhinkel.com)**
+> — the model retrains weekly and the site's comparison panel reflects the
+> latest retrain.
 
 About one month of data, 240–305 paired (forecast, observation) hourly samples
 per horizon after a temporal 80/20 split.
@@ -139,6 +145,37 @@ two unrelated sites. Conventions:
 - nginx: `/etc/nginx/sites-enabled/weather.bradhinkel.com` proxies `→ 127.0.0.1:8003`. The `server_name` includes the droplet IP because Ecowitt firmware sends the resolved IP as the HTTP `Host` header.
 - `weather-retrain.timer`: weekly, Sundays 11:00 UTC; appends to `model_metrics`. New `(target, horizon)` combinations need to be bootstrapped manually with `python -m src.ml.train` once before the timer picks them up.
 
+## Neighbor-station sweep (hyperlocal feature selection)
+
+A core part of the process. The path to better hyperlocal accuracy is using
+**nearby Weather Underground stations as upwind/advection features** for the
+own-station forecast. *Which* neighbors help — how many, and at what distances —
+depends on your location, so it's a measurement, not a guess. The sweep harness
+finds the best mix for a given site:
+
+```bash
+# validate wiring + time one config (~2 min)
+python -m tools.ablation_sweep --dry-run
+# full sweep: both targets, +1/+3/+24h, n-count + distance-band + multiband modes
+python -m tools.ablation_sweep --sweep all
+```
+
+It trains **base (own + NWP)** vs **net (base + network)** on identical rows and
+the same temporal split per (target, horizon, `FeatureConfig`), so the reported
+ΔMAE is purely the network contribution, with bootstrap CIs. Results land in
+`experiments/sweep_<stamp>/` (start with `FINDINGS.md`).
+
+**Location-independent** — register your own station, discover the network
+around *its* coordinates, and the sweep finds the mix for *your* microclimate.
+Full reproduction guide (prerequisites, data accrual, reading the output):
+[`experiments/running_the_sweep.md`](experiments/running_the_sweep.md).
+
+> Status: **exploratory / offline.** The latest run (~30-day window) shows
+> upwind features help temperature at +1 h/+3 h (Ridge), don't help at +24 h,
+> and a small cohort (n≈3–5) in a single mid-range band captures most of it.
+> These features are **not yet wired into the served model** — the live site
+> currently runs the own-station + NWP model.
+
 ## Status & roadmap
 
 | Milestone | When |
@@ -151,12 +188,6 @@ two unrelated sites. Conventions:
 | First "real" results window with ~6 weeks of data | target ~2026-06-15 |
 | Random Forest with confidence bands | with the trees milestone |
 | LSTM experiment (intentionally under-data) | target ~2026-11-01 |
-
-**Reproducing the neighbor-station sweep** (Phase 7.4) — how many nearby
-stations, at what distances, improve the +1/+3/+24h forecast — is documented in
-[`experiments/running_the_sweep.md`](experiments/running_the_sweep.md). It is
-location-independent: register your own station, discover the network around
-*its* coordinates, and the sweep finds the best mix for *your* microclimate.
 
 This is a personal project, intentionally small and slow-paced. The modeling
 timeline is deliberately conservative — watch the `model_metrics` time-series
