@@ -195,6 +195,17 @@ async def init_db() -> None:
         await conn.execute(text(
             "ALTER TABLE observations ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'ecowitt'"
         ))
+        # Forecast enrichment (2026-06-19): solar + FAO-56 ET for the irrigation
+        # use case, plus cloud_cover/wind_gust that were fetched but discarded.
+        for _col, _type in (
+            ("wind_gust_ms", "FLOAT"),
+            ("cloud_cover_pct", "FLOAT"),
+            ("solar_wm2", "FLOAT"),
+            ("et0_mm", "FLOAT"),
+        ):
+            await conn.execute(text(
+                f"ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS {_col} {_type}"
+            ))
         logger.info("Schema migrations applied.")
 
         await conn.execute(

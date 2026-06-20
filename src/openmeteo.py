@@ -28,6 +28,12 @@ HOURLY_VARIABLES = [
     "relative_humidity_2m",
     "cloud_cover",
     "weather_code",
+    # Added 2026-06-19 for the irrigation/ET use case + general forecasting
+    # experiments. shortwave_radiation (W/m^2) and the model's own FAO-56
+    # reference ET (mm) let us compare forecast solar/ET against the station;
+    # cloud_cover + wind_gusts were already fetched but discarded — now stored.
+    "shortwave_radiation",
+    "et0_fao_evapotranspiration",
 ]
 
 
@@ -53,6 +59,10 @@ class Forecast(Base):
     pressure_hpa    = Column(Float)
     humidity_pct    = Column(Float)
     weather_code    = Column(INTEGER)
+    wind_gust_ms    = Column(Float)
+    cloud_cover_pct = Column(Float)
+    solar_wm2       = Column(Float)   # shortwave_radiation
+    et0_mm          = Column(Float)   # et0_fao_evapotranspiration (FAO-56)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +131,10 @@ async def fetch_forecast(
             "pressure_hpa":    hourly["pressure_msl"][i],
             "humidity_pct":    hourly["relative_humidity_2m"][i],
             "weather_code":    hourly["weather_code"][i],
+            "wind_gust_ms":    hourly["wind_gusts_10m"][i],
+            "cloud_cover_pct": hourly["cloud_cover"][i],
+            "solar_wm2":       hourly["shortwave_radiation"][i],
+            "et0_mm":          hourly["et0_fao_evapotranspiration"][i],
         }
         for i in range(len(times))
     ]
