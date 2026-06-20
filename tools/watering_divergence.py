@@ -50,7 +50,7 @@ obs_hourly AS (
            max(COALESCE(rain_mm_1h, 0)) AS rain_h,   -- hourly accumulation: max within hour
            avg(solar_wm2) AS solar
     FROM observations, home
-    WHERE source = 'ecowitt' AND station_id = home.station_id
+    WHERE source = 'ecowitt' AND observations.station_id = home.station_id
     GROUP BY 1
 ),
 obs_daily AS (
