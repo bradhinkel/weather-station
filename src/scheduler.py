@@ -94,15 +94,31 @@ async def data_quality_job() -> None:
 # Job 3 — cleanup old data (daily at 03:00)
 # ---------------------------------------------------------------------------
 
+# Retention is deliberately long: the project's whole point is to revisit the
+# model as data accumulates, so we keep more than we currently need.
+#   - Observations are the irreplaceable ground truth and tiny (~300 MB/yr) —
+#     keep effectively forever.
+#   - Forecasts are the storage hog (~3.4 GB/mo, heavy per-valid_time
+#     re-forecast duplication) but are required to PAIR obs into training rows,
+#     so the trainable corpus can't outgrow forecast retention. 2 years (~80 GB)
+#     fits the droplet's free disk with room to spare. If disk tightens, add a
+#     thinning job (keep nearest-prior forecast per station/valid_time/horizon)
+#     rather than shortening this window.
+_OBS_RETENTION_DAYS = 3650        # ~10 years (effectively keep-forever)
+_FORECAST_RETENTION_DAYS = 730    # 2 years — was 30, which capped training at 30d
+
+
 async def cleanup_job() -> None:
-    """Delete observations older than 365 days and forecasts older than 30 days."""
+    """Delete observations and forecasts older than the retention windows."""
     async with AsyncSession(engine, expire_on_commit=False) as session:
         async with session.begin():
             obs_result = await session.execute(
-                text("DELETE FROM observations WHERE time < now() - interval '365 days'")
+                text("DELETE FROM observations WHERE time < now() - make_interval(days => :d)"),
+                {"d": _OBS_RETENTION_DAYS},
             )
             fc_result = await session.execute(
-                text("DELETE FROM forecasts WHERE forecast_time < now() - interval '30 days'")
+                text("DELETE FROM forecasts WHERE forecast_time < now() - make_interval(days => :d)"),
+                {"d": _FORECAST_RETENTION_DAYS},
             )
     logger.info(
         "cleanup_job: deleted %d old observations, %d old forecasts.",
