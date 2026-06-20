@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -26,14 +27,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _log_prefetch_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Startup forecast prefetch failed.", exc_info=exc)
+    else:
+        logger.info("Startup forecast prefetch complete.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     sched = configure_scheduler()
     sched.start()
     logger.info("Scheduler started.")
-    await fetch_forecasts_job()
+    # Prefetch forecasts in the BACKGROUND so the app binds its port
+    # immediately. A synchronous prefetch over ~322 stations blocked startup
+    # for minutes and 502'd the public site on every restart. Existing
+    # forecasts already serve predictions during the warm-up; the scheduler's
+    # hourly job also covers it. Keep a reference so the task isn't GC'd.
+    prefetch_task = asyncio.create_task(fetch_forecasts_job())
+    prefetch_task.add_done_callback(_log_prefetch_done)
+    app.state.prefetch_task = prefetch_task
+    logger.info("Startup forecast prefetch scheduled (background).")
     yield
+    if not prefetch_task.done():
+        prefetch_task.cancel()
     sched.shutdown()
     logger.info("Scheduler shut down.")
 
