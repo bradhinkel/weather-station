@@ -12,29 +12,36 @@ The whole point is to **measure how a backyard microclimate diverges from the
 regional forecast** — the biases are the signal, not noise — and to track how
 much of that gap a small ML model can recover as data accumulates.
 
-## Live results (Seattle backyard)
+## Live results
 
-> The table below is the **first published window** (retrained 2026-05-07), kept
-> as an illustrative snapshot of the expected error-vs-horizon curve. **Current
-> numbers are live on [weather.bradhinkel.com](https://weather.bradhinkel.com)**
-> — the model retrains weekly and the site's comparison panel reflects the
-> latest retrain.
-
-About one month of data, 240–305 paired (forecast, observation) hourly samples
-per horizon after a temporal 80/20 split.
+> Current **served-model** metrics (temperature), latest weekly retrain
+> **2026-06-14**, ~115k pooled station-hours, temporal 80/20 split (n_test
+> ≈ 28.7k). Live panel: [weather.bradhinkel.com](https://weather.bradhinkel.com).
 
 | Horizon | Open-Meteo MAE | Linear MAE | XGBoost MAE | Best vs. baseline |
 |---------|----------------|------------|-------------|-------------------|
-| +1 h    | 2.91 °C        | 1.09 °C    | 1.10 °C     | **−63 %**         |
-| +3 h    | 2.91 °C        | 2.09 °C    | 2.21 °C     | **−28 %**         |
-| +24 h   | 2.90 °C        | 2.90 °C    | 2.60 °C     | **−10 %**         |
+| +1 h    | 1.68 °C        | 0.75 °C    | 0.67 °C     | **−60 %**         |
+| +3 h    | 1.68 °C        | 1.33 °C    | 1.16 °C     | **−31 %**         |
+| +24 h   | 1.68 °C        | 1.42 °C    | 1.27 °C     | **−24 %**         |
 
-Reading: at +1 h, lagged observations contain a lot of signal that lets even
-Ridge regression cut the regional forecast's error by nearly 2/3. By +24 h the
-lag features are stale and ML barely edges the public forecast — that's the
-expected curve, and seeing it bend is part of the point. The +3 h row sits
-exactly in between, as data thinning would predict. A `model_metrics` table
-appends a row on every retrain so this curve becomes a time-series.
+Reading: the error-vs-horizon curve bends as expected — lag features carry the
+most signal at +1 h (best model cuts the regional forecast's error ~60 %) and
+decay toward +24 h. With ~115k training rows, **XGBoost now leads at every
+horizon** (it was under-data and tied with Ridge in the first window); more data
+favors the trees — consistent with the neighbor-station sweep, where XGBoost
+couldn't yet capitalize on a ~30-day window. `model_metrics` appends a row each
+retrain, so this is a time-series.
+
+**Caveat — pooled, not yet backyard-specific.** Training pools all ~260 network
+stations (`build_dataset(station_id=None)`), so the model learns the
+region-average forecast→observation map and the own backyard is <1 % of the
+rows. That's why the Open-Meteo baseline here (1.68 °C) is far below the ~2.9 °C
+error measured against the *sheltered backyard alone* — the regional average is
+easier to forecast than the microclimate. Recovering the backyard-specific
+signal (own-station target + neighbor upwind features, scored on an own-station
+holdout) is the active next step; until then the live model is a strong
+*regional* corrector and the microclimate accuracy is an open question — the
+forecasting approach remains an assumption pending more data.
 
 Rain target is now trainable. The earlier "no rain to train on" blocker was
 actually a dataset bug: the builder derived the hourly rain target purely from
