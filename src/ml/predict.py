@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import engine
 from src.icons import cond_label, pick_icon_slug
-from src.ml import SUPPORTED_HORIZONS, SUPPORTED_MODELS, SUPPORTED_TARGETS
+from src.ml import (
+    SUPPORTED_HORIZONS,
+    SUPPORTED_TARGETS,
+    models_for_target,
+)
+from src.quality_limits import RAIN_MM_1H_MAX
 
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "models"))
 
@@ -49,19 +54,23 @@ def list_available() -> dict[tuple[str, int], list[str]]:
         return out
     for target in SUPPORTED_TARGETS:
         for horizon in SUPPORTED_HORIZONS:
-            for model_name in SUPPORTED_MODELS:
+            for model_name in models_for_target(target):
                 if (MODEL_DIR / f"{target}_{horizon}h_{model_name}.joblib").exists():
                     out.setdefault((target, horizon), []).append(model_name)
     return out
 
 
+# Mirror the training clip (src.ml.dataset): reject impossible rain so the
+# lag_rain_mm_1h feature is built the same way at serve time as at train time.
 _LAG_SQL = text("""\
 SELECT
     avg(temp_c)        AS temp_c,
     avg(humidity_pct)  AS humidity_pct,
     avg(pressure_hpa)  AS pressure_hpa,
     avg(wind_speed_ms) AS wind_speed_ms,
-    max(rain_mm_1h)          AS rain_1h_reported,
+    max(rain_mm_1h) FILTER (
+        WHERE rain_mm_1h >= 0 AND rain_mm_1h <= :rain_max
+    ) AS rain_1h_reported,
     max(rain_mm_daily_total) AS daily_total_end
 FROM observations
 WHERE station_id = :sid
@@ -217,11 +226,13 @@ async def predict_one(
         latest = await latest_observation(session, station_id)
         lag_row = (await session.execute(
             _LAG_SQL,
-            {"sid": station_id, "start": lag_hour, "end_excl": lag_hour + timedelta(hours=1)},
+            {"sid": station_id, "start": lag_hour, "end_excl": lag_hour + timedelta(hours=1),
+             "rain_max": RAIN_MM_1H_MAX},
         )).one()
         prev_row = (await session.execute(
             _LAG_SQL,
-            {"sid": station_id, "start": lag_hour - timedelta(hours=1), "end_excl": lag_hour},
+            {"sid": station_id, "start": lag_hour - timedelta(hours=1), "end_excl": lag_hour,
+             "rain_max": RAIN_MM_1H_MAX},
         )).one()
         forecast_row = (await session.execute(
             _FORECAST_SQL,
@@ -242,6 +253,11 @@ async def predict_one(
         "precip_prob_pct": None,
         "linear": None,
         "xgboost": None,
+        # Two-stage rain model outputs (populated for target=rain_mm_1h only):
+        # expected amount (mm) and the model's own chance-of-rain, distinct from
+        # precip_prob_pct which is Open-Meteo's PoP.
+        "twostage": None,
+        "rain_probability_pct": None,
         "metrics": {},
         "warnings": [],
     }
@@ -274,7 +290,7 @@ async def predict_one(
         prev_lag_daily_total=prev_row.daily_total_end,
     )
 
-    for model_name in SUPPORTED_MODELS:
+    for model_name in models_for_target(target):
         bundle = load_bundle(target, horizon, model_name)
         if bundle is None:
             response["warnings"].append(f"No persisted model for {target}_{horizon}h_{model_name}")
@@ -287,9 +303,14 @@ async def predict_one(
                     f"{model_name}: missing feature values, skipped"
                 )
                 continue
-            pred = bundle["model"].predict(row)[0]
+            model = bundle["model"]
+            pred = model.predict(row)[0]
             response[model_name] = float(pred)
             response["metrics"][model_name] = bundle.get("metrics")
+            # The two-stage rain model also exposes a calibrated chance-of-rain,
+            # which for the watering use case matters as much as the amount.
+            if model_name == "twostage" and hasattr(model, "predict_proba"):
+                response["rain_probability_pct"] = round(float(model.predict_proba(row)[0]) * 100)
         except Exception as exc:  # pragma: no cover
             response["warnings"].append(f"{model_name}: {exc}")
 

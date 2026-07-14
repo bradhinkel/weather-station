@@ -22,12 +22,19 @@ import joblib
 import numpy as np
 import xgboost as xgb
 from sklearn.linear_model import Ridge
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import (
+    average_precision_score,
+    brier_score_loss,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_recall_fscore_support,
+)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy import create_engine, text
 
 from src.ml.dataset import _sync_dsn, build_dataset
+from src.ml.rain_model import TwoStageRainModel
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +79,48 @@ def evaluate(model, X, y, baseline) -> dict:
     }
 
 
+def train_twostage(X, y) -> TwoStageRainModel:
+    return TwoStageRainModel().fit(X, y)
+
+
+def evaluate_twostage(model: TwoStageRainModel, X, y, baseline) -> dict:
+    """Score the two-stage rain model on BOTH axes.
+
+    Regression: the expected-value prediction (P·amount) vs. the actual amount,
+    alongside the Open-Meteo baseline — comparable to the other rain models.
+
+    Classification: stage 1's rain/no-rain decision at the model's threshold —
+    precision/recall/F1, plus threshold-free PR-AUC and Brier calibration. This
+    is the axis that actually reflects rain skill on a zero-inflated target.
+    """
+    expected = model.predict(X)
+    proba = model.predict_proba(X)
+    y_wet = (np.asarray(y, dtype=float) > model.rain_threshold_mm).astype(int)
+    pred_wet = (proba >= model.decision_threshold).astype(int)
+
+    prec, rec, f1, _ = precision_recall_fscore_support(
+        y_wet, pred_wet, average="binary", zero_division=0
+    )
+    # PR-AUC and Brier need both classes present to be meaningful.
+    both_classes = 0 < int(y_wet.sum()) < len(y_wet)
+    pr_auc = float(average_precision_score(y_wet, proba)) if both_classes else None
+    brier = float(brier_score_loss(y_wet, proba)) if both_classes else None
+
+    return {
+        "mae": float(mean_absolute_error(y, expected)),
+        "rmse": float(np.sqrt(mean_squared_error(y, expected))),
+        "openmeteo_mae": float(mean_absolute_error(y, baseline)),
+        "openmeteo_rmse": float(np.sqrt(mean_squared_error(y, baseline))),
+        "n_test": int(len(y)),
+        "precision": float(prec),
+        "recall": float(rec),
+        "f1": float(f1),
+        "pr_auc": pr_auc,
+        "brier": brier,
+        "n_pos_test": int(y_wet.sum()),
+    }
+
+
 def _save(bundle: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, path)
@@ -95,11 +144,13 @@ def _log_metric_row(
                     INSERT INTO model_metrics (
                         trained_at, target, horizon, model,
                         mae, rmse, n_train, n_test,
-                        openmeteo_mae, openmeteo_rmse
+                        openmeteo_mae, openmeteo_rmse,
+                        precision, recall, f1, pr_auc, brier, n_pos_test
                     ) VALUES (
                         :trained_at, :target, :horizon, :model,
                         :mae, :rmse, :n_train, :n_test,
-                        :openmeteo_mae, :openmeteo_rmse
+                        :openmeteo_mae, :openmeteo_rmse,
+                        :precision, :recall, :f1, :pr_auc, :brier, :n_pos_test
                     )
                     ON CONFLICT (trained_at, target, horizon, model) DO NOTHING
                 """),
@@ -114,6 +165,13 @@ def _log_metric_row(
                     "n_test": metrics["n_test"],
                     "openmeteo_mae": metrics["openmeteo_mae"],
                     "openmeteo_rmse": metrics["openmeteo_rmse"],
+                    # Classification metrics — present only for the twostage model.
+                    "precision": metrics.get("precision"),
+                    "recall": metrics.get("recall"),
+                    "f1": metrics.get("f1"),
+                    "pr_auc": metrics.get("pr_auc"),
+                    "brier": metrics.get("brier"),
+                    "n_pos_test": metrics.get("n_pos_test"),
                 },
             )
         engine.dispose()
@@ -187,6 +245,28 @@ def main():
         )
         _log_metric_row(trained_at, args.target, args.horizon, "xgboost", xg_metrics, len(X_train))
         summary["xgboost"] = xg_metrics
+
+    # Rain gets the two-stage classifier+regressor on top of the regressors above.
+    if args.target == "rain_mm_1h":
+        logger.info("Training two-stage rain model (classifier + wet-regressor)…")
+        ts = train_twostage(X_train, y_train)
+        ts_metrics = evaluate_twostage(ts, X_test, y_test, baseline_test)
+        logger.info(
+            "  twostage  MAE=%.3f  P=%.3f R=%.3f F1=%.3f  PR-AUC=%s  (pos=%d/%d)",
+            ts_metrics["mae"], ts_metrics["precision"], ts_metrics["recall"],
+            ts_metrics["f1"],
+            f"{ts_metrics['pr_auc']:.3f}" if ts_metrics["pr_auc"] is not None else "n/a",
+            ts_metrics["n_pos_test"], ts_metrics["n_test"],
+        )
+        _save(
+            {
+                "model": ts, "feature_cols": feature_cols, "metrics": ts_metrics,
+                "target": args.target, "horizon": args.horizon, "trained_at": trained_at_iso,
+            },
+            MODEL_DIR / f"{args.target}_{args.horizon}h_twostage.joblib",
+        )
+        _log_metric_row(trained_at, args.target, args.horizon, "twostage", ts_metrics, len(X_train))
+        summary["twostage"] = ts_metrics
 
     print(json.dumps(summary, indent=2))
 

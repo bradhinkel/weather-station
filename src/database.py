@@ -78,7 +78,13 @@ class Observation(Base):
 
 
 class ModelMetric(Base):
-    """One row per (training run × model) — used to plot MAE/RMSE over time."""
+    """One row per (training run × model) — used to plot skill over time.
+
+    Regression columns (mae/rmse/openmeteo_*) apply to every model. The
+    classification columns are populated only by the two-stage rain model, whose
+    stage-1 classifier is scored on rain/no-rain skill; they stay NULL for plain
+    regressors.
+    """
     __tablename__ = "model_metrics"
 
     trained_at    = Column(TIMESTAMP(timezone=True), primary_key=True, nullable=False)
@@ -91,6 +97,13 @@ class ModelMetric(Base):
     n_test        = Column(INTEGER)
     openmeteo_mae  = Column(Float)
     openmeteo_rmse = Column(Float)
+    # Two-stage rain classification skill (NULL for regressors).
+    precision      = Column(Float)
+    recall         = Column(Float)
+    f1             = Column(Float)
+    pr_auc         = Column(Float)
+    brier          = Column(Float)
+    n_pos_test     = Column(INTEGER)
 
 
 class ExcludedWindow(Base):
@@ -194,6 +207,15 @@ async def init_db() -> None:
         ))
         await conn.execute(text(
             "ALTER TABLE observations ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'ecowitt'"
+        ))
+        # Two-stage rain model classification metrics (2026-07-14). NULL for
+        # plain regressors; populated for the rain twostage model.
+        for _col in ("precision", "recall", "f1", "pr_auc", "brier"):
+            await conn.execute(text(
+                f"ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS {_col} FLOAT"
+            ))
+        await conn.execute(text(
+            "ALTER TABLE model_metrics ADD COLUMN IF NOT EXISTS n_pos_test INTEGER"
         ))
         # Forecast enrichment (2026-06-19): solar + FAO-56 ET for the irrigation
         # use case, plus cloud_cover/wind_gust that were fetched but discarded.

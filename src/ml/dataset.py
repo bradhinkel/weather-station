@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 from src.ml import SUPPORTED_HORIZONS, SUPPORTED_TARGETS
+from src.quality_limits import RAIN_MM_1H_MAX
 
 load_dotenv()
 
@@ -45,17 +46,36 @@ def _sync_dsn() -> str:
 _PAIRED_SQL = text("""\
 WITH obs_hourly AS (
     SELECT
-        station_id,
-        date_trunc('hour', time) AS hour,
-        avg(temp_c)        AS temp_c,
-        avg(humidity_pct)  AS humidity_pct,
-        avg(pressure_hpa)  AS pressure_hpa,
-        avg(wind_speed_ms) AS wind_speed_ms,
-        avg(wind_dir_deg)  AS wind_dir_deg,
-        max(rain_mm_1h)          AS rain_1h_reported,
-        max(rain_mm_daily_total) AS daily_total_end
-    FROM observations
-    WHERE (CAST(:sid AS TEXT) IS NULL OR station_id = :sid)
+        o.station_id,
+        date_trunc('hour', o.time) AS hour,
+        avg(o.temp_c)        AS temp_c,
+        avg(o.humidity_pct)  AS humidity_pct,
+        avg(o.pressure_hpa)  AS pressure_hpa,
+        avg(o.wind_speed_ms) AS wind_speed_ms,
+        avg(o.wind_dir_deg)  AS wind_dir_deg,
+        -- Reject physically-impossible rain at aggregation time: a single
+        -- jammed sub-hourly reading (e.g. a gauge stuck at 896 mm/h) must not
+        -- become the hour's max(). Valid sub-hourly rows in the same hour still
+        -- aggregate normally; an hour that is ALL garbage collapses to NULL and
+        -- is then treated as dry downstream (fillna 0). Persistent offenders are
+        -- removed wholesale by the station filter below + the retire loop.
+        max(o.rain_mm_1h) FILTER (
+            WHERE o.rain_mm_1h >= 0 AND o.rain_mm_1h <= :rain_max
+        ) AS rain_1h_reported,
+        max(o.rain_mm_daily_total) AS daily_total_end
+    FROM observations o
+    LEFT JOIN stations s ON s.station_id = o.station_id
+    WHERE (CAST(:sid AS TEXT) IS NULL OR o.station_id = :sid)
+      -- Drop stations the quality loop has RETIRED for persistently bad values
+      -- (see src.pws.registry). We deliberately do NOT filter on `blacklisted`:
+      -- that flag is coverage-based (a liveness signal for live ingest/features)
+      -- and is orthogonal to data quality — a low-coverage station's historical
+      -- rows are still valid training pairs, and the worst value-offenders (e.g.
+      -- a gauge stuck at 896 mm/h) report every hour and are never coverage-
+      -- blacklisted anyway. Transient garbage is scrubbed row-by-row by the rain
+      -- clip above; retire removes the persistent offenders wholesale. COALESCE
+      -- keeps the own station and any not-yet-evaluated station.
+      AND COALESCE(s.quality_flags->>'retired', 'false') <> 'true'
     GROUP BY 1, 2
 ),
 obs_with_rain AS (
@@ -136,7 +156,7 @@ def build_dataset(
         df = pd.read_sql(
             _PAIRED_SQL,
             conn,
-            params={"sid": station_id, "horizon": horizon_hours},
+            params={"sid": station_id, "horizon": horizon_hours, "rain_max": RAIN_MM_1H_MAX},
         )
     engine.dispose()
 

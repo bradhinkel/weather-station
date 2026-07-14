@@ -20,11 +20,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import Station, engine
 from src.pws.base import PWSSource, StationInfo
-from src.pws.distance import bearing_deg, destination_point, haversine_km
+from src.pws.distance import (
+    bearing_deg,
+    bearing_octant,
+    destination_point,
+    distance_band,
+    haversine_km,
+)
 from src.pws.ingest import ingest_recent
 from src.pws.registry import (
     evaluate_quality,
     list_network_stations,
+    set_quality_flag,
     upsert_network_station,
 )
 from src.pws.wu import WUKeyMissing, WUSource
@@ -219,11 +226,132 @@ async def _cli_evaluate_quality(args) -> None:
         f"evaluate-quality (window={args.days}d, min_coverage={args.min_coverage}%):\n"
         f"  stations:       {summary['total']:>4d}\n"
         f"  active:         {summary['active']:>4d}  (rows > 0 in window)\n"
-        f"  blacklisted:    {summary['blacklisted']:>4d}  (coverage < {args.min_coverage}%)\n"
+        f"  blacklisted:    {summary['blacklisted']:>4d}  (coverage < {args.min_coverage}% or retired)\n"
+        f"  retired:        {summary['retired']:>4d}  (+{summary['newly_retired']} this run — bad values)\n"
         f"  has_pressure:   {summary['with_pressure']:>4d}\n"
         f"  has_solar:      {summary['with_solar']:>4d}\n"
         f"  has_rain_data:  {summary['with_rain_data']:>4d}"
     )
+
+
+# --------------------------------------------------------------------------
+# swap — replace retired stations with a similar one (same band + octant)
+# --------------------------------------------------------------------------
+
+# Backfill window for a freshly promoted replacement. WU's /hourly/7day serves
+# up to 7 days, which is enough for the station to clear the coverage bar on the
+# next evaluate-quality run and enter the active pool.
+_REPLACEMENT_BACKFILL_HOURS = 24 * 7
+
+
+async def swap_retired_stations(
+    src: PWSSource,
+    radius_km: float = 100.0,
+    dry_run: bool = False,
+) -> dict:
+    """Find a fresh replacement for each retired-but-not-yet-replaced station.
+
+    "Similar" = same distance band AND bearing octant from home, so the network
+    keeps its spatial coverage as broken sensors are rotated out. The nearest
+    qualifying station that isn't already registered wins. The replacement is
+    upserted, backfilled with its recent history (so it clears coverage on the
+    next quality rescan), and the retired station is stamped with ``replaced_by``
+    so it is only swapped once.
+    """
+    home_lat, home_lon = await _resolve_home()
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        all_stations = list((await session.execute(select(Station))).scalars().all())
+    existing_ids = {s.station_id for s in all_stations}
+    pending = [
+        s for s in all_stations
+        if s.is_network
+        and (s.quality_flags or {}).get("retired")
+        and not (s.quality_flags or {}).get("replaced_by")
+    ]
+
+    swapped: list[dict] = []
+    for st in pending:
+        band = distance_band(st.distance_km)
+        octant = bearing_octant(st.bearing_deg)
+        if band is None or octant is None:
+            logger.info("swap: retired %s has no band/octant — skipping", st.station_id)
+            continue
+        if st.lat is None or st.lon is None:
+            logger.info("swap: retired %s has no lat/lon — skipping", st.station_id)
+            continue
+
+        # Search around the retired station's own location for a like-for-like.
+        try:
+            candidates = await src.discover_stations(st.lat, st.lon, radius_km)
+        except Exception:
+            logger.exception("swap: discover failed for retired %s", st.station_id)
+            continue
+
+        best = None
+        best_d = float("inf")
+        for info in candidates:
+            if info.station_id in existing_ids:
+                continue
+            d = haversine_km(home_lat, home_lon, info.lat, info.lon)
+            b = bearing_deg(home_lat, home_lon, info.lat, info.lon)
+            if distance_band(d) != band or bearing_octant(b) != octant:
+                continue
+            if d < best_d:
+                best_d, best = d, (info, d, b)
+
+        if best is None:
+            logger.info(
+                "swap: no fresh candidate in band=%s octant=%s for retired %s",
+                band, octant, st.station_id,
+            )
+            continue
+
+        info, d, b = best
+        info.distance_km = d
+        info.bearing_deg = b
+        entry = {
+            "retired": st.station_id,
+            "replacement": info.station_id,
+            "band": f"{band[0]}-{band[1]}km",
+            "octant": octant,
+            "distance_km": round(d, 1),
+        }
+        if dry_run:
+            swapped.append(entry)
+            continue
+
+        await upsert_network_station(info)
+        existing_ids.add(info.station_id)
+        try:
+            await ingest_recent(
+                src, hours=_REPLACEMENT_BACKFILL_HOURS,
+                only_active=False, station_ids=[info.station_id],
+            )
+        except Exception:
+            logger.exception("swap: backfill failed for replacement %s", info.station_id)
+        await set_quality_flag(st.station_id, "replaced_by", info.station_id)
+        logger.info(
+            "swap: retired %s → %s (%.1fkm, band=%s octant=%s)",
+            st.station_id, info.station_id, d, band, octant,
+        )
+        swapped.append(entry)
+
+    return {"retired_pending": len(pending), "swapped": len(swapped), "details": swapped}
+
+
+async def _cli_swap(args) -> None:
+    src = _build_source(args.source)
+    summary = await swap_retired_stations(
+        src, radius_km=args.radius, dry_run=args.dry_run,
+    )
+    print(
+        f"swap: pending={summary['retired_pending']} swapped={summary['swapped']}"
+        + ("  (dry-run)" if args.dry_run else "")
+    )
+    for d in summary["details"]:
+        print(f"  {d['retired']} → {d['replacement']}  "
+              f"[{d['band']} {d['octant']} {d['distance_km']}km]")
 
 
 # --------------------------------------------------------------------------
@@ -261,6 +389,13 @@ def main():
     p_q.add_argument("--min-coverage", type=float, default=50.0,
                      help="coverage %% below which a station is blacklisted (default 50)")
     p_q.set_defaults(func=_cli_evaluate_quality)
+
+    p_swap = sub.add_parser("swap", help="replace retired stations with a similar fresh one")
+    p_swap.add_argument("--source", default="wu", choices=["wu"])
+    p_swap.add_argument("--radius", type=float, default=100.0,
+                        help="km search radius around each retired station")
+    p_swap.add_argument("--dry-run", action="store_true", help="print picks, don't write")
+    p_swap.set_defaults(func=_cli_swap)
 
     args = parser.parse_args()
     try:

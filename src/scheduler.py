@@ -155,9 +155,23 @@ async def wu_ingest_job() -> None:
         return
 
     try:
-        await evaluate_quality(window_days=_QUALITY_WINDOW_DAYS)
+        q = await evaluate_quality(window_days=_QUALITY_WINDOW_DAYS)
+        logger.info(
+            "wu_ingest_job: quality — active=%d blacklisted=%d retired=%d (+%d new)",
+            q["active"], q["blacklisted"], q["retired"], q["newly_retired"],
+        )
     except Exception:
         logger.exception("wu_ingest_job: quality rescore failed.")
+
+    # Rotate out stations retired for persistently bad values, pulling in a
+    # like-for-like replacement so the network keeps ~constant size + geometry.
+    try:
+        from src.pws.cli import swap_retired_stations  # local import: avoids cli argparse at module load
+        s = await swap_retired_stations(src)
+        if s["swapped"]:
+            logger.info("wu_ingest_job: swapped %d retired station(s): %s", s["swapped"], s["details"])
+    except Exception:
+        logger.exception("wu_ingest_job: station swap failed.")
 
 
 # ---------------------------------------------------------------------------

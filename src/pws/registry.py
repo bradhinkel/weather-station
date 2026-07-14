@@ -18,6 +18,88 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import Station, engine
 from src.pws.base import StationInfo
+from src.quality_limits import (
+    PRESSURE_HPA_MAX,
+    PRESSURE_HPA_MIN,
+    RAIN_MM_1H_MAX,
+    RAIN_RATE_MM_HR_MAX,
+    TEMP_C_MAX,
+    TEMP_C_MIN,
+)
+
+# --- value-quality retire policy -------------------------------------------
+# Value quality is scored over a short RECENT window (not the 7-day coverage
+# window) so a one-off glitch ages out before it can retire a station, while a
+# persistently-broken sensor scores bad every day and accrues strikes.
+VALUE_WINDOW_DAYS: int = 2
+# A window with at least this many physically-impossible readings is "bad".
+BAD_WINDOW_MIN_READINGS: int = 3
+# Retire after this many consecutive bad windows ("continues to provide poor
+# data") — with daily evaluation that's ~3 days of sustained garbage.
+STRIKE_LIMIT: int = 3
+# ...or retire immediately when a window is egregiously bad (a fully stuck
+# sensor emitting garbage nearly every hour), no need to wait out the strikes.
+IMMEDIATE_RETIRE_READINGS: int = 24
+
+
+def assess_value_quality(
+    prior_flags: dict,
+    bad_readings: int,
+    now_iso: str,
+) -> tuple[dict, bool]:
+    """Pure strike/retire decision — no I/O, so it's unit-testable.
+
+    Takes the station's existing flags and this window's count of impossible
+    readings; returns (durable_updates, newly_retired). ``durable_updates`` are
+    the keys to merge into quality_flags: the strike counter, the recent
+    bad-reading count, and — once tripped — the sticky ``retired`` marker. Retire
+    is one-way: a station already retired stays retired regardless of this
+    window (its garbage may have aged out of the DB, but we don't resurrect it).
+    """
+    already_retired = bool(prior_flags.get("retired", False))
+    strikes = int(prior_flags.get("value_strikes", 0))
+
+    bad_window = bad_readings >= BAD_WINDOW_MIN_READINGS
+    strikes = strikes + 1 if bad_window else 0
+
+    updates: dict = {"value_strikes": strikes, "bad_readings_recent": bad_readings}
+    newly_retired = False
+
+    retire_now = bad_readings >= IMMEDIATE_RETIRE_READINGS or strikes >= STRIKE_LIMIT
+    if already_retired or retire_now:
+        updates["retired"] = True
+        # Force blacklisted too so every coverage-based consumer excludes it.
+        updates["blacklisted"] = True
+        if already_retired:
+            # Preserve the original retire provenance.
+            updates["retired_at"] = prior_flags.get("retired_at", now_iso)
+            updates["retired_reason"] = prior_flags.get("retired_reason", "value-quality")
+        else:
+            newly_retired = True
+            updates["retired_at"] = now_iso
+            updates["retired_reason"] = (
+                f"value-quality: {bad_readings} impossible readings in "
+                f"{VALUE_WINDOW_DAYS}d (strikes={strikes})"
+            )
+        # Carry a replaced_by marker forward if one was already recorded.
+        if "replaced_by" in prior_flags:
+            updates["replaced_by"] = prior_flags["replaced_by"]
+
+    return updates, newly_retired
+
+
+_VALUE_QUALITY_SQL = text("""\
+SELECT count(*) FILTER (
+    WHERE rain_mm_1h > :rain_max OR rain_mm_1h < 0
+       OR rain_rate_mm_hr > :rate_max
+       OR temp_c < :temp_min OR temp_c > :temp_max
+       OR pressure_hpa < :p_min OR pressure_hpa > :p_max
+)::int AS bad_readings
+FROM observations
+WHERE source <> 'ecowitt'
+  AND station_id = :sid
+  AND time >= now() - make_interval(days => :vdays)
+""")
 
 
 async def upsert_network_station(info: StationInfo) -> None:
@@ -122,11 +204,16 @@ async def evaluate_quality(
 
     Writes a JSONB blob to ``stations.quality_flags`` keyed by:
       rows_<N>d, coverage_<N>d_pct, has_pressure, has_solar, has_rain_data,
-      has_temp, blacklisted, evaluated_at.
+      has_temp, blacklisted, evaluated_at, plus the durable value-quality keys
+      value_strikes / bad_readings_recent / retired[/_at/_reason].
 
     A station is `blacklisted=True` when its coverage_pct is below the
-    threshold — that includes the 0-row case. Downstream feature code
-    filters with ``quality_flags->>'blacklisted' = 'false'``.
+    threshold OR it has been retired for bad values. Downstream feature/ingest
+    code filters with ``quality_flags->>'blacklisted' = 'false'``; training
+    filters on ``retired`` (see src.ml.dataset).
+
+    Coverage flags are recomputed each run; the value-quality keys are carried
+    forward and updated so a retire (or accrued strikes) survives the rescan.
 
     Returns a one-shot summary; pretty-print upstream in the CLI.
     """
@@ -138,6 +225,8 @@ async def evaluate_quality(
         "total": 0,
         "active": 0,            # rows_n > 0
         "blacklisted": 0,
+        "retired": 0,
+        "newly_retired": 0,
         "with_pressure": 0,
         "with_solar": 0,
         "with_rain_data": 0,
@@ -157,6 +246,22 @@ async def evaluate_quality(
             coverage = round(rows_n * 100.0 / max_rows, 1) if max_rows else 0.0
             blacklisted = coverage < min_coverage_pct
 
+            # Value-quality: count impossible readings over the recent window,
+            # then apply the strike/retire policy against the existing flags.
+            vq = (await session.execute(
+                _VALUE_QUALITY_SQL,
+                {
+                    "sid": s.station_id, "vdays": VALUE_WINDOW_DAYS,
+                    "rain_max": RAIN_MM_1H_MAX, "rate_max": RAIN_RATE_MM_HR_MAX,
+                    "temp_min": TEMP_C_MIN, "temp_max": TEMP_C_MAX,
+                    "p_min": PRESSURE_HPA_MIN, "p_max": PRESSURE_HPA_MAX,
+                },
+            )).one()
+            prior = dict(s.quality_flags or {})
+            vq_updates, newly_retired = assess_value_quality(
+                prior, vq.bad_readings or 0, now
+            )
+
             flags = {
                 rows_key:        rows_n,
                 cov_key:         coverage,
@@ -167,6 +272,8 @@ async def evaluate_quality(
                 "blacklisted":   blacklisted,
                 "evaluated_at":  now,
             }
+            # Value-quality updates win — notably `retired` forces blacklisted=True.
+            flags.update(vq_updates)
             await session.execute(
                 update(Station).where(Station.station_id == s.station_id).values(quality_flags=flags)
             )
@@ -174,8 +281,12 @@ async def evaluate_quality(
             summary["total"] += 1
             if rows_n > 0:
                 summary["active"] += 1
-            if blacklisted:
+            if flags["blacklisted"]:
                 summary["blacklisted"] += 1
+            if flags.get("retired"):
+                summary["retired"] += 1
+            if newly_retired:
+                summary["newly_retired"] += 1
             if flags["has_pressure"]:
                 summary["with_pressure"] += 1
             if flags["has_solar"]:

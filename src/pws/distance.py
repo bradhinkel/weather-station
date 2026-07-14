@@ -7,8 +7,33 @@ don't need ellipsoidal precision (Vincenty's, etc.).
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 EARTH_RADIUS_KM = 6371.0088
+
+# Distance bands (km) and bearing octants used to describe a station's position
+# relative to home. A replacement station is "similar" when it shares both, so
+# the auto-swap preserves the network's spatial coverage.
+DISTANCE_BANDS_KM: tuple[tuple[float, float], ...] = ((0, 10), (10, 25), (25, 50), (50, 100))
+OCTANTS: tuple[str, ...] = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def distance_band(distance_km: Optional[float]) -> Optional[tuple[float, float]]:
+    """Return the (lo, hi) km band containing ``distance_km``, or None."""
+    if distance_km is None:
+        return None
+    for lo, hi in DISTANCE_BANDS_KM:
+        if lo <= distance_km < hi:
+            return (lo, hi)
+    return None
+
+
+def bearing_octant(bearing: Optional[float]) -> Optional[str]:
+    """Return the compass octant ('N'..'NW') for ``bearing`` degrees, or None."""
+    if bearing is None:
+        return None
+    idx = int(((bearing % 360.0) + 22.5) // 45.0) % 8
+    return OCTANTS[idx]
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
