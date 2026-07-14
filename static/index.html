@@ -106,6 +106,12 @@
     .fc-head__cond { font-weight: 500; }
     .fc-head__time { color: var(--muted); font-size: 12px; }
     .fc-head__pop { color: var(--muted); font-size: 12px; }
+    /* Model chance-of-rain badge — the headline output of the two-stage model. */
+    .fc-head__rainprob {
+      display: inline-block; margin-top: 4px;
+      color: var(--accent); font-weight: 600; font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
 
     .pred-row {
       display: flex; align-items: center; justify-content: space-between;
@@ -199,6 +205,7 @@
             <span class="fc-head__cond" id="fc_cond">—</span>
             <span class="fc-head__time" id="fc_time">—</span>
             <span class="fc-head__pop" id="fc_pop"></span>
+            <span class="fc-head__rainprob" id="fc_rainprob" hidden></span>
           </div>
         </div>
 
@@ -232,6 +239,18 @@
             <div class="pred-meta" id="p_xgb_delta"></div>
           </div>
         </div>
+        <!-- Two-stage rain model — shown only when the Rain target is selected. -->
+        <div class="pred-row" id="row_twostage" hidden>
+          <div>
+            <div class="pred-name">Two-stage rain model</div>
+            <div class="pred-meta">Chance of rain × expected amount</div>
+          </div>
+          <div style="text-align:right">
+            <div class="pred-val" id="p_twostage">—</div>
+            <div class="pred-meta" id="p_twostage_meta"></div>
+          </div>
+        </div>
+        <div class="pred-meta" id="rain_skill" style="margin-top:10px" hidden></div>
       </div>
     </section>
 
@@ -362,6 +381,42 @@ async function refresh() {
     xgb === null || xgb === undefined ? "—" : `${fmt(xgb)} ${unit}`;
   document.getElementById("p_xgb_delta").innerHTML = deltaText(xgb, om, unit);
 
+  // ---- Two-stage rain model: chance of rain + expected amount (rain only) ----
+  const isRain = target === "rain_mm_1h";
+  const rowTs = document.getElementById("row_twostage");
+  const skillEl = document.getElementById("rain_skill");
+  const rainProbEl = document.getElementById("fc_rainprob");
+  if (isRain) {
+    const ts = predData?.twostage;
+    const prob = predData?.rain_probability_pct;
+    const hasProb = prob !== null && prob !== undefined;
+    rowTs.hidden = false;
+    // Lead with the probability — chance of rain matters as much as amount.
+    document.getElementById("p_twostage").textContent = hasProb ? `${prob}%` : "—";
+    document.getElementById("p_twostage_meta").textContent =
+      (ts === null || ts === undefined) ? "chance of rain"
+                                        : `chance · ${fmt(ts)} ${unit} expected`;
+    rainProbEl.hidden = !hasProb;
+    rainProbEl.textContent = hasProb ? `Chance of rain: ${prob}%` : "";
+    // Rain/no-rain skill is the honest metric on a zero-inflated target (MAE flatters).
+    const tsm = (predData?.metrics || {}).twostage;
+    if (tsm && tsm.f1 !== undefined && tsm.f1 !== null) {
+      const pct = v => (v === null || v === undefined) ? "—" : `${(v * 100).toFixed(0)}%`;
+      skillEl.hidden = false;
+      skillEl.textContent =
+        `Rain/no-rain skill on hold-out (+${horizon}h): precision ${pct(tsm.precision)} · ` +
+        `recall ${pct(tsm.recall)} · F1 ${pct(tsm.f1)}` +
+        (tsm.pr_auc != null ? ` · PR-AUC ${pct(tsm.pr_auc)}` : "");
+    } else {
+      skillEl.hidden = true;
+    }
+  } else {
+    rowTs.hidden = true;
+    skillEl.hidden = true;
+    rainProbEl.hidden = true;
+    rainProbEl.textContent = "";
+  }
+
   // ---- Warnings ----
   const warnings = predData?.warnings || [];
   if (warnings.length) showWarning(warnings.join(" · "));
@@ -377,7 +432,7 @@ async function refresh() {
     if (sample?.openmeteo_mae !== undefined) {
       rows.push(`<tr><td>Open-Meteo (baseline)</td><td class="num">${fmt(sample.openmeteo_mae)}</td><td class="num">${fmt(sample.openmeteo_rmse)}</td><td class="num">${sample.n_test}</td></tr>`);
     }
-    for (const name of ["linear", "xgboost"]) {
+    for (const name of ["linear", "xgboost", "twostage"]) {
       const m = metrics[name];
       if (!m) continue;
       rows.push(`<tr><td>${name}</td><td class="num">${fmt(m.mae)}</td><td class="num">${fmt(m.rmse)}</td><td class="num">${m.n_test}</td></tr>`);
