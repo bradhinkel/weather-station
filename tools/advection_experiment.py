@@ -57,20 +57,20 @@ BOOTSTRAP_N = 1000
 def _load_geometry(engine) -> tuple[str, float, float, dict, dict]:
     with engine.connect() as conn:
         home = conn.execute(
-            text("SELECT station_id, latitude, longitude FROM stations WHERE is_network = false LIMIT 1")
+            text("SELECT station_id, lat, lon FROM stations WHERE is_network = false LIMIT 1")
         ).first()
         rows = conn.execute(
             text("""
-                SELECT station_id, latitude, longitude, distance_km, bearing_deg
+                SELECT station_id, lat, lon, distance_km, bearing_deg
                 FROM stations
                 WHERE is_network = true
-                  AND latitude IS NOT NULL AND longitude IS NOT NULL
+                  AND lat IS NOT NULL AND lon IS NOT NULL
                   AND COALESCE(quality_flags->>'retired', 'false') <> 'true'
             """)
         ).fetchall()
-    coords = {r.station_id: (r.latitude, r.longitude) for r in rows}
+    coords = {r.station_id: (r.lat, r.lon) for r in rows}
     geom = {r.station_id: (r.distance_km, r.bearing_deg) for r in rows}
-    return home.station_id, home.latitude, home.longitude, coords, geom
+    return home.station_id, home.lat, home.lon, coords, geom
 
 
 def _load_obs_lookup(engine, start, end) -> dict:
