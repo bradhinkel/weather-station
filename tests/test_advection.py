@@ -142,6 +142,24 @@ def test_distance_column_records_the_reach_even_when_invalid():
     assert out["adv_distance_km"].iloc[0] == pytest.approx(3.0 * 6 * 3.6)
 
 
+# --- the build_dataset contract --------------------------------------------------
+
+@pytest.mark.parametrize("wind_dir", [0.0, 45.0, 90.0, 180.0, 269.9, 359.0])
+def test_wind_dir_round_trips_through_the_sin_cos_encoding(wind_dir):
+    """build_dataset drops f_wind_dir_deg, keeping only wind_dir_sin/wind_dir_cos.
+
+    Callers must reconstruct the bearing with atan2 rather than assume the raw column
+    survives. The first run of tools/advection_experiment.py assumed it did and died on
+    a live AttributeError -- the unit tests above had passed because they hand-built
+    frames containing the column the author believed was there. This asserts the
+    inverse actually holds.
+    """
+    sin_v = np.sin(np.deg2rad(wind_dir))
+    cos_v = np.cos(np.deg2rad(wind_dir))
+    recovered = (np.degrees(np.arctan2(sin_v, cos_v)) + 360.0) % 360.0
+    assert recovered == pytest.approx(wind_dir, abs=1e-6)
+
+
 # --- impute_advection ------------------------------------------------------------
 
 def test_impute_uses_train_mean_not_zero():

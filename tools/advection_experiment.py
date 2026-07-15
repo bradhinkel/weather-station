@@ -184,6 +184,13 @@ def main() -> int:
             logger.warning("+%dh: only %d own-station rows, skipping", h, len(df))
             continue
 
+        # build_dataset consumes f_wind_dir_deg into sin/cos and drops the raw column
+        # (FEATURE_COLS carries wind_dir_sin/wind_dir_cos). Reconstruct the bearing --
+        # atan2 inverts the encoding exactly.
+        df["f_wind_dir_deg"] = (
+            np.degrees(np.arctan2(df["wind_dir_sin"], df["wind_dir_cos"])) + 360.0
+        ) % 360.0
+
         obs_lookup = _load_obs_lookup(
             engine,
             df["valid_time"].min() - pd.Timedelta(hours=h + 2),
