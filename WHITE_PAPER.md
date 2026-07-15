@@ -322,6 +322,62 @@ and distance-band findings are less exposed — they compare configurations agai
 other at a fixed horizon — but none of it has been re-verified. **The sweep needs a rerun
 before any of it is cited as settled.**
 
+### Testing the physics directly: a null result
+
+The 0–2 km finding has a mechanism once you do the arithmetic. Air moves. The parcel
+arriving at `t+h` is currently `v · h` upwind, and at the forecast's median wind
+(2.26 m/s) that is 8 km at +1 h and 98 km at +12 h. A station 2 km away is **~15 minutes
+of advection** from home — it sits in the same air mass and cannot carry new information.
+It is not a weak predictor; it is geometrically excluded from being one.
+
+That reasoning implies a better feature than a fixed band: select the station nearest the
+projected point `v · h` upwind and read *its* observation at `t`, rather than averaging a
+static cohort. `src/features/advection.py` implements it (NWP wind for the velocity — see
+§8 for why the network's own anemometers cannot be used), and
+`tools/advection_experiment.py` tests three arms — base, base+cohort-mean, base+advection
+— on identical own-station rows with bootstrap CIs.
+
+**It does not work, at least not measurably here.**
+
+| Horizon | model | base | cohort | adv | Δ adv vs base | Δ adv vs cohort | valid |
+|---|---|---|---|---|---|---|---|
+| +1 h | linear | 0.496 | 0.567 | 0.499 | −0.003 [−0.014,+0.009] | +0.066 [+0.006,+0.132] | 64 % |
+| +3 h | linear | 0.773 | 0.785 | 0.756 | +0.017 [−0.009,+0.045] | +0.030 [−0.024,+0.092] | 62 % |
+| +6 h | linear | 0.915 | 1.006 | 0.900 | +0.016 [−0.020,+0.052] | +0.105 [+0.038,+0.174] | 61 % |
+| +6 h | xgboost | 0.992 | 0.971 | 1.023 | **−0.031 [−0.058,−0.004]** | **−0.051 [−0.090,−0.012]** | 61 % |
+| +12 h | linear | 1.072 | 1.069 | 1.033 | **+0.039 [+0.019,+0.056]** | +0.038 [−0.014,+0.092] | 36 % |
+| +24 h | linear | 1.410 | 1.406 | 1.468 | **−0.058 [−0.072,−0.044]** | −0.060 [−0.101,−0.019] | 10 % |
+
+*(Full grid: [`experiments/advection_vs_cohort.csv`](experiments/advection_vs_cohort.csv).)*
+
+**Against base, the network is null**: one of ten cells is significantly positive, two are
+significantly negative. **Against the cohort mean it is mixed** — four significant wins for
+dynamic selection, three for band averaging. And at +6 h the two model classes **disagree
+on the sign** of the effect, which is the signature of noise rather than signal.
+
+Three reasons this test cannot settle the question, recorded so the next attempt is
+better rather than merely repeated:
+
+1. **Coverage runs out.** Median reach is 92 km at +12 h and **193 km at +24 h**, past the
+   edge of the 100 km registry, so only **10 % of +24 h rows** have a real upwind station.
+   The rest are imputed. That is itself a finding — **a 100 km network caps advection
+   features at roughly +6 h at median wind** — but it means the long horizons measure
+   imputation, not physics.
+2. **Two of the features are wind-speed proxies.** `adv_distance_km` *is* `v · h`, a
+   monotonic rescaling of a wind speed the model already has, and `adv_valid` is a
+   calm-wind flag. Any gain may be the model learning "is it windy" rather than "what is
+   upwind". This is a design error; the clean test uses only `adv_temp_c` and
+   `adv_temp_gradient`.
+3. **The sample is too small.** 1,089 train / 273 test rows, chasing effects of
+   0.02–0.10 °C. The intervals are wide enough to accommodate almost any story.
+
+A prediction was recorded before the run: that advection would help at +3 h and +6 h and
+fade by +12 h, with the explicit note that *"if it helps at +12 h but not +3 h, something
+is wrong."* +3 h is null; the only significant win is +12 h linear. By its own stated
+criterion the result is not to be trusted. It is reported here because a pre-registered
+prediction that fails is worth more than one quietly revised afterwards — and because
+this is the fourth idea in this report that looked sound and did not survive measurement.
+
 ## 8. The instrument is part of the model
 
 The project's premise is that the backyard's biases are signal. Measuring them produced
