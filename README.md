@@ -57,6 +57,49 @@ them on a 4 GB droplet that also hosts Postgres; an unconstrained forest is ~100
 each, ~1 GB across the set. This is a deployment constraint being reported
 honestly, not a fair fight.
 
+### More data is not the lever — variety is
+
+The project's standing assumption was that accuracy would improve as the corpus
+grows toward a year. Measured, that is **false for row count**. Holding the calendar
+window fixed at 44.2 days and varying only how many rows the model sees
+(`--sample random`, +3 h, Open-Meteo baseline 1.456):
+
+| n_train | span | Linear | RandomForest | XGBoost |
+|---------|------|--------|--------------|---------|
+| 11 527  | 44.2 d | 1.243 | 1.221 | **1.162** |
+| 23 055  | 44.2 d | 1.233 | 1.283 | **1.152** |
+| 57 639  | 44.2 d | 1.228 | 1.284 | **1.157** |
+| 115 279 | 44.2 d | 1.226 | 1.298 | **1.127** |
+| 172 919 | 44.2 d | 1.225 | 1.290 | **1.133** |
+| 230 559 | 44.2 d | 1.223 | 1.315 | **1.135** |
+
+**The curve is flat.** A 20× increase in training rows buys XGBoost 0.027 °C. The
+model plateaued around ~11.5k rows; the corpus holds 230k. Collecting more hours of
+the same weather does essentially nothing.
+
+Read the scope carefully. Random sampling holds the window at 44 days, so this
+measures *more rows from the same season* — and that is exhausted. What a year would
+add is **seasonal variety** (winter, frontal passages, a wet season), which this
+cannot test because those months do not exist in the corpus yet. The lever is
+different data, not more data.
+
+XGBoost also wins at **every** row count, including 11 527 — there is no
+linear→tree crossover in this range. (The one prior data point where Ridge beat
+XGBoost was ~590 rows on a different feature set, far below anything here.)
+RandomForest *degrading* with more data (1.221 → 1.315) is most likely the depth-10
+memory cap: a fixed-depth tree averaging over increasingly heterogeneous data gains
+bias. That is an artifact of the sizing decision above, not a property of the model.
+
+Raw data: [`experiments/learning_curve_temp_3h_random.csv`](experiments/learning_curve_temp_3h_random.csv).
+The `--sample recent` variant
+([`…_temp_3h.csv`](experiments/learning_curve_temp_3h.csv)) shrinks the calendar span
+along with n and is **not** a model comparison — at n=11 527 it reports Ridge at MAE
+**26.177 °C**, because a ~2.3-day window makes `doy_sin`/`doy_cos` constant,
+`StandardScaler` divides by a near-zero std, and Ridge extrapolates onto a test set
+weeks away. That number is real output answering a question nobody asked; it is kept
+as a worked example of bug class 4, committed by the very tool built to audit the
+others.
+
 ### The founding question: can the backyard beat the forecast?
 
 The table above is **regional** skill. Training pools all ~320 network stations
@@ -393,10 +436,16 @@ data, and the LSTM will not beat them. The reasoning is that a single-station
 bias-correction task has weak sequential structure beyond the lag features already
 supplied, and trees need less data, train in seconds, and cost nothing to serve.
 This is a *prediction*, not a result — the LSTM has not been built. It is written
-down in advance so a negative result stays honest. Evidence so far is consistent
-but not conclusive: Ridge beat XGBoost at ~590 rows, XGBoost leads at ~230k, and
-[`tools/learning_curve.py`](tools/learning_curve.py) measures where that crossover
-actually happened.
+down in advance so a negative result stays honest.
+
+The measured half of that claim already holds: XGBoost leads at every row count from
+11.5k to 230k on the pooled regional target. The *unmeasured* half is the interesting
+one, and the learning curve above narrows it — since accuracy has already plateaued in
+row count, "wait for a year of data" only makes sense as "wait for a year of
+**seasons**". The LSTM test in November will land on a corpus that is longer but, in
+row-count terms, no richer. If a sequence model is going to win anywhere, the honest
+place to look is the own-station target (where Ridge currently beats both trees at
++1 h), not the pooled one.
 
 ### Known limitations
 
