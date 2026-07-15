@@ -57,14 +57,50 @@ them on a 4 GB droplet that also hosts Postgres; an unconstrained forest is ~100
 each, ~1 GB across the set. This is a deployment constraint being reported
 honestly, not a fair fight.
 
-**Caveat — pooled, not yet backyard-specific.** Training pools all ~320 network
-stations (`build_dataset(station_id=None)`), so the model learns the
-region-average forecast→observation map and the own backyard is <1 % of the rows.
-The live model is therefore a strong *regional* corrector; the microclimate
-question is still open. Training on the own-station target with neighbour upwind
-features, scored on an own-station holdout, is the active next step.
-[`tools/own_station_eval.py`](tools/own_station_eval.py) scores the served models
-on own-station test rows in the meantime.
+### The founding question: can the backyard beat the forecast?
+
+The table above is **regional** skill. Training pools all ~320 network stations
+(`build_dataset(station_id=None)`), so the model learns the region-average
+forecast→observation map and the backyard is <1 % of the rows. Scoring the same
+served models on **own-station test rows only** — taking the split from the pooled
+frame so those rows were genuinely held out — answers the question the project was
+actually started to ask:
+
+| Horizon | Open-Meteo | Linear | RandomForest | XGBoost | best skill |
+|---------|-----------|--------|--------------|---------|------------|
+| +1 h    | 0.952 °C  | **0.550** | 0.627     | 0.616   | **+42 %**  |
+| +3 h    | 0.973 °C  | **0.880** | 1.020     | 0.941   | +9.6 %     |
+| +6 h    | 1.030 °C  | 1.158  | 1.212        | **1.050** | **−2 %** |
+| +12 h   | 1.141 °C  | 1.619  | 1.342        | **1.150** | **−0.9 %** |
+| +24 h   | 1.397 °C  | 1.555  | 1.468        | **1.377** | +1.4 %   |
+
+**The honest answer is: only at +1 h.** Beyond +3 h every served model is at or
+below the raw regional forecast in the backyard — negative skill means *worse than
+doing nothing*. Ridge at +12 h is 42 % worse than simply believing Open-Meteo.
+
+This is the pooled-vs-own problem with numbers on it for the first time. A model
+trained on the region-average map corrects a sheltered backyard *toward the regional
+mean*, which is the wrong direction for a microclimate. Regional skill of
+52/22/10/1.4/12 % becomes 42/10/−2/−1/1 % in the yard it was built for. **The
+regional win does not transfer.**
+
+Note also that **Ridge beats both trees on the microclimate at +1 h** (0.550 vs
+0.627/0.616) — the inverse of the pooled ranking, where XGBoost led everywhere. The
+trees' pooled advantage comes from fitting the regional signal harder, and that is
+precisely the signal a microclimate model does not want.
+
+⚠️ **n_own is only 276–295 rows per horizon** (vs ~57k pooled), and these figures
+carry no confidence intervals. The pattern is consistent across all five horizons
+and three models, which is why it is reported; a single cell should not be quoted.
+Reproduce with:
+
+```bash
+python -m tools.own_station_eval --target temp_c
+```
+
+Training on the own-station target with neighbour upwind features — rather than
+scoring a pooled model against the backyard after the fact — is the active next
+step, and the numbers above are the argument for it.
 
 > A previous version of this section claimed the regional average was *easier* to
 > forecast than the microclimate (1.68 °C pooled vs ~2.9 °C backyard). That
