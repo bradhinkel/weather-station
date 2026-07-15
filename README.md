@@ -35,20 +35,42 @@ section, read [Errors made](#errors-made).
 | +12 h   | 1.529 °C       | 1.864      | 1.632            | **1.508**   | **1.4 %**               |
 | +24 h   | 1.813 °C       | 1.798      | 1.763            | **1.591**   | 12 %                    |
 
-**Read the +12 h row, not the +1 h row.** The interesting result here is not that
-a local model beats a regional forecast an hour out — persistence does that. It is
-that the advantage *collapses at +12 h and partially recovers at +24 h*. That
-shape is the **diurnal cycle**: the model's strongest local input is an
-observation from `t − horizon`, so at +12 h that observation is maximally out of
-phase with the target (noon predicting midnight), while at +24 h it is back in
-phase. Local data has a **shelf life, and the shelf life is not monotonic**.
+**Read the model MAEs, not the skill column.** The tree MAEs are **monotonic** in
+lead time (XGBoost 0.691 → 1.133 → 1.334 → 1.508 → 1.591), which is what a
+well-behaved forecast model should do. The dip-and-recovery in the *skill* column
+therefore comes from the **denominator**: Open-Meteo crawls from 1.439 to 1.529 out
+to +12 h and then jumps to 1.813 at +24 h. The "+24 h recovery" is the baseline
+falling off a cliff, not the model improving.
 
-Ridge goes **negative-skill at +12 h** (1.864 vs Open-Meteo's 1.529) — actively
-worse than doing nothing. Only the trees stay ahead of the baseline across the
-whole range, and XGBoost leads at every horizon on ~230k training rows. That
-ordering is data-dependent, not a law: on the ~590-row ablation window Ridge beat
-XGBoost outright. See [`tools/learning_curve.py`](tools/learning_curve.py), which
-measures MAE vs. N rather than asserting that trees win eventually.
+⚠️ That +24 h baseline jump is **not yet explained and should not be built on**.
+Own-station Open-Meteo does *not* jump (1.209 → 1.264 — see the note below), and the
++24 h split has fewer rows (54k vs 58k) because forecast lead availability thins past
+24 h, so it may be a changing station mix rather than real NWP degradation.
+
+**Ridge is the only model that is non-monotonic** — 1.864 at +12 h, *improving* to
+1.798 at +24 h, and it does the same on own-station rows (1.619 → 1.555). This is the
+diurnal cycle, but not in the obvious way: `hod_sin`/`hod_cos` are already features, so
+the model knows the target hour's phase. What it needs is the **interaction** between
+the lag observation and the phase offset — a noon reading implies something different
+about midnight than about 1 pm. Ridge is additive and cannot express `lag_temp × hod`
+without an explicit cross term; trees get it free by splitting on `hod` and then on
+`lag_temp`. So Ridge peaks at the anti-diurnal point (+12 h) and partially recovers at
++24 h when the lag returns to phase, while the trees stay smooth.
+
+That is a mechanistic reason to prefer trees here — this problem has interaction
+structure an additive model provably cannot represent — rather than a general claim
+that trees are better. Ridge also goes **negative-skill at +12 h** (1.864 vs 1.529):
+actively worse than doing nothing. See
+[`tools/learning_curve.py`](tools/learning_curve.py), which measures MAE vs. N rather
+than asserting that trees win eventually.
+
+⚠️ **`doy_sin`/`doy_cos` are currently a liability, not a seasonal feature.** They are
+meant to encode the annual cycle, but the corpus spans **58 days** — over that window
+they are a near-monotonic ramp ("days since 2026-05-20"), not a cycle. The model cannot
+learn a year's seasonality from eight weeks; it learns a local trend and extrapolates it.
+That is the mechanism behind the MAE 26 °C blowup documented under the learning curve
+below. They should earn their place once a full annual cycle exists, and be treated as
+suspect until then.
 
 **RandomForest is handicapped here and the number should not be read as a verdict
 on the model class.** It is capped at 100 trees / depth 10 because the API
