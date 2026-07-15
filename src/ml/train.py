@@ -21,6 +21,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import xgboost as xgb
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import (
     average_precision_score,
@@ -51,6 +52,20 @@ def train_linear(X, y) -> Pipeline:
     pipe = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=1.0))])
     pipe.fit(X, y)
     return pipe
+
+
+def train_randomforest(X, y) -> RandomForestRegressor:
+    # n_jobs=2 matches the droplet's vCPU count; the weekly retrain runs while the
+    # API is up and has already been CPU-starved once by training (2026-06-01).
+    model = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=12,
+        min_samples_leaf=2,
+        random_state=42,
+        n_jobs=2,
+    )
+    model.fit(X, y)
+    return model
 
 
 def train_xgboost(X, y) -> xgb.XGBRegressor:
@@ -185,6 +200,7 @@ def main():
     parser.add_argument("--horizon", type=int, required=True)
     parser.add_argument("--station-id", default=None)
     parser.add_argument("--no-xgb", action="store_true")
+    parser.add_argument("--no-rf", action="store_true")
     parser.add_argument("--min-rows", type=int, default=50)
     args = parser.parse_args()
 
@@ -226,6 +242,27 @@ def main():
     )
     _log_metric_row(trained_at, args.target, args.horizon, "linear", lin_metrics, len(X_train))
     summary["linear"] = lin_metrics
+
+    if not args.no_rf:
+        logger.info("Training RandomForest…")
+        rf = train_randomforest(X_train, y_train)
+        rf_metrics = evaluate(rf, X_test, y_test, baseline_test)
+        logger.info(
+            "  randomforest MAE=%.3f  RMSE=%.3f   (Open-Meteo MAE=%.3f RMSE=%.3f)",
+            rf_metrics["mae"], rf_metrics["rmse"],
+            rf_metrics["openmeteo_mae"], rf_metrics["openmeteo_rmse"],
+        )
+        _save(
+            {
+                "model": rf, "feature_cols": feature_cols, "metrics": rf_metrics,
+                "target": args.target, "horizon": args.horizon, "trained_at": trained_at_iso,
+            },
+            MODEL_DIR / f"{args.target}_{args.horizon}h_randomforest.joblib",
+        )
+        _log_metric_row(
+            trained_at, args.target, args.horizon, "randomforest", rf_metrics, len(X_train)
+        )
+        summary["randomforest"] = rf_metrics
 
     if not args.no_xgb:
         logger.info("Training XGBoost…")

@@ -40,7 +40,11 @@ class FeatureConfig:
 
     # How to determine "current wind direction" for upwind/downwind class.
     # "own"          — home station wind_dir (subject to shelter effect; the
-    #                  user's setup has ~81° measured offset, see memory).
+    #                  home station reads -37° CCW vs the 246-station network mean,
+    #                  validated 2026-05-18 at wind >= 1 m/s where the spread
+    #                  collapses to std 7°. An earlier ~81° estimate was measured
+    #                  against a single comparator and inflated by calm-wind noise;
+    #                  it is superseded. Speed is NOT suppressed (own/network 0.96).
     # "network_mean" — circular mean across nearby quality stations (default).
     # "nwp"          — Open-Meteo forecast at the prediction time.
     wind_reference: WindReference = "network_mean"

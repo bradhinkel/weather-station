@@ -1,11 +1,17 @@
-"""Build a training dataset by joining hourly observations with the nearest
-prior Open-Meteo forecast for the target hour.
+"""Build a training dataset by joining hourly observations with the Open-Meteo
+forecast that was available `horizon` hours ahead of the target hour.
+
+A row answers: "standing at time t, holding an observation for t and the
+forecast issued for t+horizon, what is the actual value at t+horizon?" Both the
+lag observation AND the forecast are therefore horizon-lagged — see the lead-time
+constraint in _PAIRED_SQL. The horizon is a real forecast lead time, not just the
+staleness of the lag feature.
 
 Schema produced (columns in returned DataFrame):
   - valid_time, station_id
   - feature columns (see FEATURE_COLS)
   - y                     -- the target value at valid_time
-  - openmeteo_baseline    -- the raw forecast value at valid_time (for comparison)
+  - openmeteo_baseline    -- the horizon-lead forecast value (for comparison)
 """
 
 from __future__ import annotations
@@ -111,12 +117,22 @@ nearest_forecast AS (
         precip_mm     AS f_precip_mm,
         weather_code  AS f_weather_code
     FROM forecasts
-    WHERE forecast_time < valid_time
+    -- Take the freshest forecast that was ALREADY ISSUED `horizon` hours before
+    -- the target hour. This must mirror serving: predict.py asks for
+    -- valid_time = now + horizon, so the newest forecast it can possibly see was
+    -- issued at now = valid_time - horizon. Selecting purely on
+    -- `forecast_time < valid_time` (as this did until 2026-07-15) hands training
+    -- a ~1h-lead forecast at EVERY horizon, so the model learns to trust f_temp_c
+    -- like a nowcast and then meets a 24h-lead forecast in production — train/serve
+    -- skew that widens with horizon, and it also pinned the Open-Meteo baseline to
+    -- a horizon-independent constant (the flat 1.68 °C in the old README table).
+    WHERE forecast_time <= valid_time - make_interval(hours => :horizon)
     ORDER BY station_id, valid_time, forecast_time DESC
 )
 SELECT
     f.valid_time,
     f.station_id,
+    f.forecast_time,
     f.f_temp_c, f.f_humidity_pct, f.f_pressure_hpa,
     f.f_wind_speed_ms, f.f_wind_dir_deg,
     f.f_precip_mm, f.f_weather_code,
@@ -187,6 +203,11 @@ def build_dataset(
     df["y"] = df[f"y_{target}"]
     df["openmeteo_baseline"] = df["f_temp_c"] if target == "temp_c" else df["f_precip_mm"]
 
-    needed = FEATURE_COLS + ["y", "openmeteo_baseline", "valid_time", "station_id"]
+    # forecast_time rides along (not a feature) so callers can verify the realised
+    # forecast lead — see src.ml.invariants.check_forecast_lead.
+    df["forecast_time"] = pd.to_datetime(df["forecast_time"], utc=True)
+    needed = FEATURE_COLS + [
+        "y", "openmeteo_baseline", "valid_time", "station_id", "forecast_time",
+    ]
     df = df.dropna(subset=FEATURE_COLS + ["y"]).reset_index(drop=True)
     return df[needed], FEATURE_COLS
