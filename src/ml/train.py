@@ -55,12 +55,16 @@ def train_linear(X, y) -> Pipeline:
 
 
 def train_randomforest(X, y) -> RandomForestRegressor:
-    # n_jobs=2 matches the droplet's vCPU count; the weekly retrain runs while the
-    # API is up and has already been CPU-starved once by training (2026-06-01).
+    # Sized to survive the droplet, not to win a benchmark. The API mtime-caches
+    # every bundle in memory and there are now 5 horizons x 2 targets of them on a
+    # 4GB box that also hosts postgres; 200 trees at depth 12 over ~230k rows is
+    # ~100MB per forest, which does not fit that budget. Depth 10 / 100 trees is
+    # ~13MB. n_jobs=2 matches the vCPU count — the weekly retrain runs while the API
+    # is up and has already CPU-starved it once (2026-06-01).
     model = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=12,
-        min_samples_leaf=2,
+        n_estimators=100,
+        max_depth=10,
+        min_samples_leaf=5,
         random_state=42,
         n_jobs=2,
     )
