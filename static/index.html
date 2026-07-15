@@ -77,7 +77,7 @@
     }
     .seg button {
       background: transparent; border: 0; color: var(--muted);
-      font: inherit; font-size: 13px; padding: 6px 14px;
+      font: inherit; font-size: 13px; padding: 6px 11px;
       cursor: pointer; border-radius: 6px;
       transition: background-color 0.12s, color 0.12s;
     }
@@ -188,6 +188,8 @@
           <div class="seg" role="group" aria-label="Forecast horizon">
             <button type="button" data-horizon="1"  aria-pressed="false">+1h</button>
             <button type="button" data-horizon="3"  aria-pressed="true">+3h</button>
+            <button type="button" data-horizon="6"  aria-pressed="false">+6h</button>
+            <button type="button" data-horizon="12" aria-pressed="false">+12h</button>
             <button type="button" data-horizon="24" aria-pressed="false">+24h</button>
           </div>
           <div class="target-control">
@@ -227,6 +229,16 @@
           <div style="text-align:right">
             <div class="pred-val" id="p_linear">—</div>
             <div class="pred-meta" id="p_linear_delta"></div>
+          </div>
+        </div>
+        <div class="pred-row">
+          <div>
+            <div class="pred-name">Random Forest</div>
+            <div class="pred-meta">Bagged trees</div>
+          </div>
+          <div style="text-align:right">
+            <div class="pred-val" id="p_rf">—</div>
+            <div class="pred-meta" id="p_rf_delta"></div>
           </div>
         </div>
         <div class="pred-row">
@@ -376,6 +388,10 @@ async function refresh() {
   document.getElementById("p_linear").textContent =
     lin === null || lin === undefined ? "—" : `${fmt(lin)} ${unit}`;
   document.getElementById("p_linear_delta").innerHTML = deltaText(lin, om, unit);
+  const rf = predData?.randomforest;
+  document.getElementById("p_rf").textContent =
+    rf === null || rf === undefined ? "—" : `${fmt(rf)} ${unit}`;
+  document.getElementById("p_rf_delta").innerHTML = deltaText(rf, om, unit);
   const xgb = predData?.xgboost;
   document.getElementById("p_xgb").textContent =
     xgb === null || xgb === undefined ? "—" : `${fmt(xgb)} ${unit}`;
@@ -432,7 +448,7 @@ async function refresh() {
     if (sample?.openmeteo_mae !== undefined) {
       rows.push(`<tr><td>Open-Meteo (baseline)</td><td class="num">${fmt(sample.openmeteo_mae)}</td><td class="num">${fmt(sample.openmeteo_rmse)}</td><td class="num">${sample.n_test}</td></tr>`);
     }
-    for (const name of ["linear", "xgboost", "twostage"]) {
+    for (const name of ["linear", "randomforest", "xgboost", "twostage"]) {
       const m = metrics[name];
       if (!m) continue;
       rows.push(`<tr><td>${name}</td><td class="num">${fmt(m.mae)}</td><td class="num">${fmt(m.rmse)}</td><td class="num">${m.n_test}</td></tr>`);
