@@ -9,20 +9,22 @@ Code and data: [github.com/bradhinkel/weather-station](https://github.com/bradhi
 
 ## Abstract
 
-I put a weather station in my backyard to answer one question: can hyperlocal data
-beat the regional forecast where I actually live? Ten weeks in, the honest answer is
-*not yet, and for an instructive reason*. Against my own station, the current model
-beats Open-Meteo by 42% one hour out, ties it at three, and is **worse than doing
-nothing** beyond six. But this is not a data problem and not a model problem — it is
-an **architecture** problem. The model is trained pooled across 323 stations with no
-station identity among its features, so it cannot represent "this station runs warm."
-It is structurally forbidden from learning the very thing the project was built to
-measure. Separately, a learning curve shows accuracy plateaus at ~11.5k training rows
-against a corpus of 230k: **more data of the same kind buys nothing**, while the
-own-station model that matters holds only 1,366 rows and is 8.4× *below* that plateau.
-The headline result is therefore methodological: the hard part of this project has
-never been the model. It has been knowing whether a number means what it appears to
-mean.
+I put a weather station in my backyard to answer one question: can hyperlocal data beat
+the regional forecast where I actually live? **Yes — by 42% at one hour and 25.4% at
+three.** But that answer took ten weeks to reach, and almost none of the difficulty was
+in the modelling. The model that shipped for most of that period was *worse than doing
+nothing* in my own backyard beyond +6h, for a reason that turned out to be
+architectural rather than statistical: trained pooled across 323 stations with **no
+station identity among its features**, it was structurally forbidden from representing
+"this station runs warm" — the exact thing the project exists to measure. Training on
+1,089 of the right rows beats 230,000 of the wrong ones by 15%. Adding elevation-adjusted,
+quality-screened upwind neighbour averages takes the backyard from 0.963 °C to 0.718 °C
+at +3h. Along the way: a learning curve showing accuracy plateaus at ~11.5k rows against
+a corpus of 230k (**more data of the same kind buys nothing**); a quarter of the
+crowdsourced network reporting bad data, some of it from indoors; and six shipped defects
+that each produced plausible, publishable, wrong numbers. The through-line is
+methodological. The model was never the bottleneck. Knowing whether a number meant what
+it appeared to mean was the bottleneck — every single time.
 
 ---
 
@@ -40,6 +42,7 @@ mean.
 10. [Three standing assertions](#10-three-standing-assertions)
 11. [What comes next](#11-what-comes-next)
 12. [Reproducibility](#12-reproducibility)
+13. [On method: why this was a conversation](#13-on-method-why-this-was-a-conversation)
 
 ---
 
@@ -105,12 +108,23 @@ of the exercise — contributes **1,366 of 290,000 rows, under half a percent**.
 
 ## 3. The answer so far
 
-Against the pooled network, the model looks strong. Against my actual backyard, which
-is the question, it does not.
+**Yes, at +1 h and +3 h.** But the route to that answer is the report, because the model
+that has been serving this project for ten weeks does *not* get there — and understanding
+why took every section that follows.
 
-**Own-station skill** — the served models scored on own-station test rows only, with
-the train/test boundary taken from the pooled frame so those rows were genuinely held
-out:
+**Where it ends up.** Trained on the own-station target, fed elevation-adjusted
+quality-screened upwind neighbour averages (§4, §7):
+
+| +3 h, own station | MAE | skill vs Open-Meteo |
+|---|---|---|
+| Open-Meteo | 0.963 °C | — |
+| **Served model** (pooled, 230k rows) scored on the backyard | 0.941 | **2.3 %** |
+| Own-trained (1,089 rows) | 0.798 | 17.1 % |
+| **Own-trained + QC'd upwind bands** | **0.718** | **25.4 %** |
+
+**Where it started.** The *served* models — pooled across 323 stations — scored on
+own-station test rows only, with the train/test boundary taken from the pooled frame so
+those rows were genuinely held out:
 
 | Horizon | Open-Meteo | Ridge | RandomForest | XGBoost | best skill |
 |---|---|---|---|---|---|
@@ -123,14 +137,16 @@ out:
 Skill = `1 − MAE_model / MAE_openmeteo`. Negative means **worse than believing the
 regional forecast**.
 
-**The backyard beats the forecast for one hour.** After that it is a wash, and at +6 h
-and +12 h the model is actively harmful. For comparison, the same models against the
-pooled network score 52 / 22 / 10 / 1.4 / 12 %. The regional win does not transfer to
-the yard it was built for.
+Read those two tables together, because the gap between them is the whole argument. The
+served model beats the backyard's forecast **for one hour**; after that it is a wash, and
+at +6 h and +12 h it is *actively harmful*. Against the pooled network the same models
+score 52 / 22 / 10 / 1.4 / 12 %. **The regional win does not transfer to the yard it was
+built for** — and the reason is not data, and not the model class. It is that the model
+has no way to know which yard it is standing in (§4).
 
-*Caveat: n_own is 276–295 rows per horizon, without confidence intervals. The pattern
-is reported because it is consistent across five horizons and three models; no single
-cell should be quoted.*
+*Caveat: n_own is 276–295 rows per horizon, without confidence intervals. The pattern is
+reported because it is consistent across five horizons and three models; no single cell
+should be quoted. The two tables also come from different temporal splits — see §4.*
 
 **Rain**, judged on precision/recall/F1 because MAE on a zero-inflated target rewards a
 predictor that always says "dry":
@@ -633,6 +649,12 @@ properly pre-registered.**
   the only model that goes non-monotonic at the anti-diurnal point, because it cannot
   express the `lag_temp × hod` interaction that this problem is built out of. That is an
   argument from structure, not from a leaderboard.
+- **A second mechanism arrived with the QC work** (§7), and it points the same way.
+  Screening the network helps Ridge significantly (+0.042 at +3 h) and does *nothing* for
+  XGBoost (+0.002). A tree routes around a bad station by splitting on it; a mean cannot.
+  So trees are natively robust to precisely the station noise that dominates this
+  problem — which is an argument from structure again, not from a leaderboard, and it is
+  the second time in this report that trees win for a reason rather than by a margin.
 - **RandomForest: not yet a fair test.** It currently trails, but it is capped at 100
   trees and depth 10 to fit the droplet's memory budget — the API holds every bundle in
   memory on a 4 GB box shared with Postgres, and an unconstrained forest is ~100 MB each
@@ -659,65 +681,79 @@ architecture is fixed.
 
 ### Assertion 3 — hyperlocal data should still beat the regional model
 
-**Verdict: untested, and the current evidence against it is an artifact.**
+**Verdict: CONFIRMED at +1 h and +3 h.** Not "plausible", not "untested".
 
-The intuition is that the backyard is warmer and calmer than the regional forecast says.
-The measurements support the underlying claim: a **stable −37° wind rotation** (std 7°)
-and a **+2.0 °C daytime warm bias** with nights matching. Those are real, consistent,
-directional biases — precisely the shape a correction model should be able to exploit.
+| +3 h, own station | MAE | skill |
+|---|---|---|
+| Open-Meteo | 0.963 | — |
+| Pooled model (230k rows) on the backyard | 0.941 | 2.3 % |
+| Own-trained (1,089 rows) | 0.798 | 17.1 % |
+| **Own-trained + QC'd upwind band means** | **0.718** | **25.4 %** |
 
-The reason the numbers do not yet show it is §4: **the model has no station identity, so
-it cannot represent a per-station bias at all.** It is not that hyperlocal data failed to
-beat the regional model. It is that the experiment testing that hypothesis has not been
-run. The +42 % at +1 h is the model exploiting the only local signal it *can* express —
-persistence through the lag feature. The negative skill at +6 h and +12 h is what happens
-when persistence decays and there is no channel left for the systematic bias.
+The intuition was right the whole time, and the measurements support the mechanism: a
+**stable −37° wind rotation** (std 7°) and a **+2.0 °C daytime warm bias** with nights
+matching — real, consistent, directional biases, exactly the shape a correction model can
+exploit.
 
-Two honest complications:
+What was wrong was never the hypothesis. It was §4: **the model had no station identity,
+so it could not represent a per-station bias at all.** The +42 % at +1 h was the model
+exploiting the only local signal it *could* express — persistence, through the lag
+feature. The negative skill at +6 h/+12 h was what happens when persistence decays and
+there is no channel left for the systematic bias. Give it the right target and the right
+neighbours and the signal is there.
 
-1. **Part of the warm bias may be the instrument** (§8). A wind-sheltered sensor is a
-   poorly-aspirated sensor, and poor aspiration reads high in daylight and correct at
-   night — the exact diurnal signature observed. This does not refute the assertion; it
-   means the assertion's *magnitude* is unverified until there is a reference sensor.
-   And note that if part of the bias is instrumental, it is still learnable and still
-   worth correcting — it is just not "microclimate."
+Two honest complications remain:
+
+1. **Part of the warm bias may be the instrument** (§8), and the literature makes this
+   worse rather than better: Nipen finds +0.5 °C residual warm bias surviving QC, Napoly
+   +0.95 K, Fenner 0.5–1.0 K in daytime summer, and Sgoff finds that assimilating
+   Netatmo *without* a diurnal-cycle bias correction actively degrades forecasts. A
+   wind-sheltered sensor is a poorly-aspirated sensor, and poor aspiration reads high in
+   daylight and correct at night — the exact signature measured here. So the *magnitude*
+   of "my backyard is warmer" is unverified until a reference sensor exists. Note this
+   does not undermine the skill numbers above: an instrumental bias is still learnable and
+   still worth correcting. It just is not microclimate.
 2. **"Calmer" is not what was measured.** Wind speed matches the network within noise
-   (ratio 0.96); it is direction that rotates. The felt calmness is likely turbulence and
-   gust structure, which this sensor package does not resolve.
+   (ratio 0.96); direction rotates. The felt calmness is likely turbulence and gust
+   structure, which this sensor package cannot resolve. And the network's own wind is
+   unusable in absolute terms anyway — median 0.28 m/s against the forecast's 2.26,
+   mostly a 10 m-vs-2 m measurement-height artifact shared by every backyard anemometer.
 
-On rain, the assertion is appropriately hedged, and the hedge is correct. There is real
-skill at +1 h and +3 h and none by +12 h, but every rain number here is pooled and from
-the driest weeks of the year, with the backyard recording zero wet hours in July. The
-one directional signal worth chasing: over 30 paired spring days the regional forecast
-**under-called local rain 5×** (21 mm forecast vs 100 mm measured), and watering
-decisions would have differed on **~17 % of days**. If hyperlocal rain has value, that is
-where it lives — and it will be measurable in October, not July.
+On rain the assertion is appropriately hedged, and the hedge is correct: real skill at
++1 h and +3 h, none by +12 h, every number pooled and from the driest weeks of the year.
+The directional signal worth chasing: over 30 paired spring days the regional forecast
+**under-called local rain 5×** (21 mm forecast vs 100 mm measured), and watering decisions
+would have differed on **~17 % of days**. That is measurable in October, not July.
 
 ## 11. What comes next
 
 In leverage order, and shaped by the findings above rather than by the original roadmap:
 
-1. **Give the model a station identity, or train on the own-station target.** §4 says
-   this is the single blocking issue: everything else is optimisation on top of a model
-   that cannot express the hypothesis. Both routes are worth testing — a pooled model
-   with per-station offsets keeps the data richness; an own-station model keeps the
-   microclimate pure. The regional-base-plus-local-correction shape gets both.
-2. **Rerun the neighbour sweep on the corrected join** (§7) before citing any of it.
-3. **Test the interaction claim directly** (§5): add explicit `lag_temp × hod` cross
+1. **Ship what §4 and §7 already demonstrated.** The own-trained model plus
+   elevation-adjusted, QC-screened upwind band means reaches 25.4 % skill at +3 h, and the
+   live site serves neither. This is no longer a research question; it is a deployment
+   task. Both architectural routes remain worth testing — a pooled model with per-station
+   offsets keeps the data richness, an own-station model keeps the microclimate pure, and
+   regional-base-plus-local-correction gets both — but the own-trained result is in hand.
+2. **Settle own-vs-pooled with a controlled comparison.** The 0.798-vs-0.941 result in §4
+   comes from two different temporal splits. The effect dwarfs the discrepancy, but the
+   claim deserves one clean head-to-head before it is load-bearing.
+3. **Rerun the neighbour sweep on the corrected join** (§7) before citing any of it.
+4. **Test the interaction claim directly** (§5): add explicit `lag_temp × hod` cross
    terms to Ridge. If the +12 h anomaly disappears, the mechanism is confirmed and the
    argument for trees becomes an argument about *representation* rather than about
    families.
-4. **Drop or gate `doy_sin`/`doy_cos`** until a full annual cycle exists (§5).
-5. **Get a reference temperature sensor** — aspirated or better shielded — to separate
+5. **Drop or gate `doy_sin`/`doy_cos`** until a full annual cycle exists (§5).
+6. **Get a reference temperature sensor** — aspirated or better shielded — to separate
    microclimate from radiative error (§8). Without it, the project's headline claim about
    its own backyard has an asterisk it cannot remove.
-6. **Wait for the wet season.** October through March is when rain becomes measurable and
+7. **Wait for the wet season.** October through March is when rain becomes measurable and
    when local data should matter most. That is calendar, not effort.
-7. **Freeze the pre-registration and lock a holdout.** The document exists but remains a
+8. **Freeze the pre-registration and lock a holdout.** The document exists but remains a
    partial draft — holdout window, git SHA and episode lists are still `<TBD>`, and its
    primary horizon (6 h) was only trained on 2026-07-15. Given that six defects have
    shipped, this discipline is not ceremony; it is the demonstrated remedy.
-8. **LSTM, ~November**, as pre-registered — landing on a corpus that is longer but, in
+9. **LSTM, ~November**, as pre-registered — landing on a corpus that is longer but, in
    row-count terms, no richer.
 
 ## 12. Reproducibility
@@ -738,6 +774,95 @@ python -m tools.export_metrics    --out experiments/model_metrics.csv
 
 One caution when comparing across retrains: the split is temporal 80/20, so every
 retrain's test set is a different window. Compare skill-vs-baseline, not raw MAE.
+
+## 13. On method: why this was a conversation
+
+Most of the analysis in this report, and effectively all of the code, was produced by an
+AI agent (Claude Code) working against this repository. That is worth stating plainly,
+and it is worth examining, because the way the work went cuts against the prevailing
+claim that most software is — and ought to be — written autonomously by AI given a
+sufficiently good brief.
+
+### What actually happened
+
+Every substantive correction in this report arrived as a **short question from a
+non-specialist**, not from the analysis:
+
+| The question | What it overturned |
+|---|---|
+| *"Shouldn't the diurnal cycle be addressed within the model — do we include date & time?"* | Killed the report's then-headline finding, that local data has a "non-monotonic shelf life." It was wrong. It had already been committed to the README, to the project's memory, and to this paper's outline as *the most novel result*. It had survived the agent's own review. The true explanation — Ridge cannot represent `lag_temp × hod`, which is why it is the only model that wobbles at +12 h (§5) — is better, and was not found by analysis. |
+| *"I would suggest that averaging is good — but averaged by distance."* | Produced **the only significant network win in the project's history** (§7). The agent had built single-station selection, which was precisely backwards given the per-station noise the agent itself had documented two sections earlier. |
+| *"Shouldn't it make a difference to track this specific station?"* | Led to the advection work, and surfaced that the network's own anemometers are unusable (0.28 m/s vs the forecast's 2.26) — a 10 m-vs-2 m semantics error sitting in the feature vector. |
+| *"How does Meier track individual stations?"* | Corrected the agent's claim that Nipen et al. was data assimilation. It is post-processing — the *same family as this project* — which inverted the framing of where this work sits in the literature. |
+| *"Are my points accurate?"* | Started the audit that found defect 5, which invalidated every horizon-dependent number the project had published. |
+
+The person asking is not an ML specialist and does not claim to be. The questions were not
+expert challenges. They were the **obvious** questions — the ones the analysis had
+reasoned past.
+
+### Why this is structural, not incidental
+
+Notice what every failure in this report has in common. The five shipped defects (§9)
+produced *plausible numbers that answered the wrong question*. The three predictions the
+agent made and lost in a single day — advection-by-single-station, QC-as-the-cause of the
+network win, the shelf-life story — were *plausible reasoning that did not survive
+measurement*. **Same species.**
+
+That matters more than it first appears, because plausible-but-wrong is exactly what a
+language model produces most fluently. The instrument being used to audit for
+plausible-but-wrong is the instrument most prone to generating it. That is not a
+capability gap that closes with a better model; it is a structural property of the method,
+in the same way that §8's radiative bias is not a calibration problem but a consequence of
+where the sensor sits. **The check has to come from outside** — from physics, from
+measurement, or from someone asking why the number looks like that.
+
+This is also why the "obviousness" of the questions is the point rather than an
+embarrassment. An expert reviewer would have engaged the agent's reasoning on its own
+terms. A non-specialist asked whether the clock was in the model — and the reasoning
+collapsed, because it had been elaborate and wrong rather than simple and wrong.
+
+### What the 80% claim measures, and what it does not
+
+The claim that most code is and should be written by AI is **not contradicted here**.
+Essentially every line in this repository was written by the agent: ~2,000 lines in the
+final day alone, 145 unit tests, five analysis tools, a QC subsystem, all deployed and
+running. That part worked, completely, and at a speed no human pace matches.
+
+What the claim silently merges is two different activities. **Writing code and deciding
+what is true are not the same job.** The 80% statistic measures the first and is entirely
+silent on the second. And this report's central finding is that the first was never the
+bottleneck:
+
+> The model was never the bottleneck; the measurement was.
+> The agent was never the bottleneck; the judgment was.
+
+The division of labour that worked was not "human supervises AI." It was closer to: the
+agent supplied mechanical execution, breadth, literature synthesis, and the patience to
+audit its own SQL; the human supplied physical intuition, a refusal to accept elaborate
+answers, and the domain sense that a backyard is warmer and that noise should be averaged.
+Neither half would have produced this report. The agent alone would have shipped the
+shelf-life finding — that is not speculation, it *was committed to the repository*. The
+human alone would not have found the join defect, built the invariants, or read six papers
+in an afternoon.
+
+### The caveat this section is obliged to carry
+
+**This is the weakest evidence in the report and should be read that way.** It is n=1,
+unblinded, uncontrolled, and written by one of the two participants — a standard of
+evidence the preceding twelve sections would reject on sight. The report demands bootstrap
+confidence intervals of a 0.08 °C effect and then makes a process claim from a single
+session.
+
+The counterfactual is untested. Nobody ran the autonomous version. "The agent would have
+shipped the wrong finding" is a claim about a world that was not observed; what is
+documented in git is narrower and less dramatic — three claims made, three questions
+asked, three claims withdrawn. It is also possible, as the human involved suggests, that
+better-specified goals would have caught some of this, and that the failure is one of
+briefing rather than of autonomy. That hypothesis is untested too.
+
+What can be said without overreach is this: on a task whose entire difficulty was
+distinguishing true numbers from plausible ones, the pauses were where the value was. Not
+the generation. The interruptions.
 
 ---
 
@@ -774,12 +899,21 @@ what the features could express, what the instrument was actually reading. The
 engineering was the easy part and took ten weeks. Learning to distrust its output is the
 part that is still going.
 
+That pattern held right down to how this report was produced (§13). The code was never the
+constraint; roughly two thousand lines of it appeared in a day. The constraint was knowing
+which of the resulting numbers meant anything — and the corrections came from someone
+asking whether the clock was in the model, and whether it might be better to average.
+
 Which is the argument for calling this preliminary and meaning it. A version of this
 report written six weeks ago would have claimed a 60% win over the regional forecast, a
 skilled 24-hour rain model, and a validated crowdsourcing strategy. All three were
-artifacts. The most valuable thing here is not the results table. It is a precise,
-dated account of why the earlier results table was wrong — and a set of assertions
-written down in advance, so that the next time it is wrong, that will be visible too.
+artifacts. A version written this morning would have claimed a non-monotonic shelf life
+for local data. That was an artifact too, and it survived until someone asked an obvious
+question about it.
+
+The most valuable thing here is not the results table. It is a precise, dated account of
+why the earlier results tables were wrong — and a set of assertions written down in
+advance, so that the next time it is wrong, that will be visible too.
 
 ---
 
