@@ -49,6 +49,25 @@ def _sync_dsn() -> str:
     )
 
 
+def resolve_own_station_id() -> Optional[str]:
+    """The `is_network = false` station — the backyard this project exists to forecast.
+
+    Training pooled across the whole network produces a region-average corrector, which
+    measured 2.3% skill on the own station at +3h against 17.1% for the same model class
+    trained on own-station rows alone. 1,089 of the right rows beat 230k of the wrong
+    ones, because the pooled target is a different question.
+    """
+    engine = create_engine(_sync_dsn())
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT station_id FROM stations WHERE is_network = false LIMIT 1")
+            ).first()
+    finally:
+        engine.dispose()
+    return row[0] if row else None
+
+
 _PAIRED_SQL = text("""\
 WITH obs_hourly AS (
     SELECT

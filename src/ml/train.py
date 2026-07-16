@@ -34,7 +34,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy import create_engine, text
 
-from src.ml.dataset import _sync_dsn, build_dataset
+from src.ml.dataset import _sync_dsn, build_dataset, resolve_own_station_id
 from src.ml.rain_model import TwoStageRainModel
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,12 @@ def main():
     parser.add_argument("--target", required=True)
     parser.add_argument("--horizon", type=int, required=True)
     parser.add_argument("--station-id", default=None)
+    parser.add_argument(
+        "--pooled",
+        action="store_true",
+        help="Train across ALL network stations (the pre-2026-07-15 behaviour). This "
+             "yields a region-average corrector, not a microclimate model.",
+    )
     parser.add_argument("--no-xgb", action="store_true")
     parser.add_argument("--no-rf", action="store_true")
     parser.add_argument("--min-rows", type=int, default=50)
@@ -210,7 +216,20 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-    df, feature_cols = build_dataset(args.target, args.horizon, args.station_id)
+    # Own-station is the DEFAULT as of 2026-07-15. Pooling all ~320 stations trains the
+    # region-average forecast->observation map, in which the backyard is <1% of rows, and
+    # the resulting model corrects this yard toward a regional mean it does not live at:
+    # 2.3% skill on own-station rows at +3h, versus 17.1% for the same model class
+    # trained on own-station rows alone. Pass --pooled to get the old behaviour.
+    station_id = args.station_id
+    if station_id is None and not args.pooled:
+        station_id = resolve_own_station_id()
+        if station_id is None:
+            logger.error("No own station (is_network=false) found; pass --pooled to train regionally.")
+            return
+        logger.info("Training on OWN station %s (pass --pooled for the regional model)", station_id)
+
+    df, feature_cols = build_dataset(args.target, args.horizon, station_id)
     logger.info("Dataset size: %d rows, %d features", len(df), len(feature_cols))
 
     if len(df) < args.min_rows:
