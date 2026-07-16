@@ -196,6 +196,32 @@ not evidentiary: train on the own-station target directly, or give the pooled mo
 station identity (an embedding, a per-station offset, or siting covariates) so it can
 say what it currently cannot.
 
+**First evidence that this is right, and it is not subtle.** Training on own-station rows
+alone — 1,089 of them — against the pooled model's 230,000:
+
+| +3 h, own station | MAE | skill vs Open-Meteo |
+|---|---|---|
+| Open-Meteo | 0.963 | — |
+| Pooled model (230k rows) scored on the backyard | 0.941 | 2.3 % |
+| **Own-trained** (1,089 rows, own + NWP) | **0.798** | **17.1 %** |
+| **Own-trained + QC'd upwind band means** (§7) | **0.718** | **25.4 %** |
+
+**A model trained on 1,089 of the right rows beats one trained on 230,000 of the wrong
+ones, by 15 %.** It was never a data-volume problem. The pooled model had 200× more data
+and lost, because it was answering a different question — and no quantity of the wrong
+question converges on the right answer.
+
+*Caveat: those two middle rows come from different temporal splits (294 vs 273 test rows;
+the pooled evaluation took its boundary from the pooled frame, the own-trained one from
+the own frame), so this is indicative rather than controlled. The effect (0.143) dwarfs
+the baseline discrepancy between the two splits (0.010), so a split artifact is unlikely,
+but a clean head-to-head is owed before this is quoted as settled.*
+
+Stacked together, the two architectural corrections — train on the right target, then
+average QC-screened upwind neighbours by distance band — take the backyard from
+**0.963 °C (Open-Meteo) to 0.718 °C: 25.4 % skill at +3 h.** That is the founding question,
+answered affirmatively, at one horizon, on eight weeks of summer data.
+
 ## 5. The interaction is the model
 
 The feature list contains `hod_sin` and `hod_cos`. The model knows the target hour's
@@ -377,6 +403,80 @@ is wrong."* +3 h is null; the only significant win is +12 h linear. By its own s
 criterion the result is not to be trusted. It is reported here because a pre-registered
 prediction that fails is worth more than one quietly revised afterwards — and because
 this is the fourth idea in this report that looked sound and did not survive measurement.
+
+### What actually worked: average the band, don't pick the station
+
+The single-station design above was wrong, and wrong for a reason this report had
+already established two sections earlier. Every CWS study finds **0.5–1.0 °C of residual
+per-station bias surviving QC** (§8). Selecting *one* station therefore maximises
+exposure to precisely the error that dominates this problem. Averaging kills the random
+component as √N while leaving the systematic part — which is exactly why the literature
+saturates at ~4 stations (Nipen) and why this project's own sweep plateaued at n=1. The
+saturation everyone reports is not a disappointment; it is the signature of the random
+part being gone.
+
+Rebuilt as **elevation-adjusted upwind band means** — stations selected per row against
+the forecast wind bearing, grouped into four distance bands, averaged within each,
+adjusted to the home station's elevation before averaging — the network finally pays:
+
+| Horizon | model | Open-Meteo | base | + network (QC'd) | Δ vs base |
+|---|---|---|---|---|---|
+| +1 h | xgboost | 0.946 | 0.442 | 0.445 | −0.003 [−0.045,+0.038] |
+| **+3 h** | **xgboost** | **0.963** | **0.798** | **0.718** | **+0.080 [+0.037,+0.123]** |
+| +6 h | xgboost | 1.037 | 0.998 | 0.958 | +0.039 [−0.006,+0.089] |
+| +12 h | xgboost | 1.147 | 1.094 | 1.123 | −0.029 [−0.066,+0.005] |
+
+*(Full grid: [`experiments/network_qc_vs_noqc.csv`](experiments/network_qc_vs_noqc.csv).)*
+
+**+3 h is the first clean, significant network win this project has produced**: a 10 %
+MAE cut, **25.4 % skill against Open-Meteo, in the backyard**. +1 h is null exactly as
+the geometry demands — at 11 km of advection the neighbours are already in the same air
+mass. +24 h is discarded: the two model classes disagree in sign there (xgboost +0.052,
+linear −0.135), the noise signature again.
+
+### Quality control: necessary, but not the cause
+
+Nipen's result — *without QC the merged product is only marginally better than raw NWP,
+and worse in daytime and summer* — predicted that screening would be the difference
+between a useless network and a useful one. **It was not.** Un-screened band means score
+0.721 at +3 h; QC-screened means score 0.718. QC contributes **+0.002 — nothing.**
+
+The QC pass is still worth having, and the reason is mechanistic rather than
+promotional. It helps **Ridge** significantly (+0.042 at +3 h, +0.013 at +1 h) and does
+nothing for trees. A tree routes around a bad station by splitting on it; a mean cannot.
+Averaging garbage poisons a linear model and merely dilutes a tree's. So QC matters most
+for the model class least likely to be shipped — which is worth knowing, and is not what
+the literature led this project to expect.
+
+What QC *did* deliver was a measurement of the network's condition, and it is not good:
+
+| | |
+|---|---|
+| Testable station-hours | 294,516 |
+| Hourly readings flagged | **16.3 %** |
+| Stations `suspect` or `isolated` | **80 / 322 (24.8 %)** |
+
+**One quarter of the network is bad data**, and it has been feeding every model, sweep
+and experiment in this report. The flagged fraction — 16.3 % — lands on Nipen's SCT
+removal rate of 16.3 % exactly, from an independently designed pass on a different
+network in a different country. That convergence is the best available evidence the
+screening is calibrated rather than arbitrary.
+
+The indoor-sensor detector is the part no eyeball would have found: `KWAGRANI70`
+correlates **0.19** with its buddy median, `KWASNOHO174` 0.57, `KWASEATT2409` 0.61. Those
+stations are climatologically plausible *every single hour* — they pass any outlier test
+— they simply do not track the outdoor diurnal cycle, because they are indoors.
+
+Two departures from the published schemes were forced by this network's shape.
+CrowdQC+'s **3 km buddy radius** assumes a city: Berlin and Toulouse pack 500–2,000
+stations into one. This network is 322 over a 100 km radius — one per 97 km², ~10 km mean
+spacing — so a 3 km rule would have isolated nearly everything; k-nearest with a 25 km cap
+leaves exactly **one** station isolated. And **elevation adjustment is mandatory here,
+not a refinement**: the registry spans **0–1174 m**, some 7.6 °C of legitimate lapse
+rate, so an unadjusted comparison against a crowd median would have condemned the Cascade
+foothills as broken sensors. Open-Meteo had been returning DEM elevation on every
+forecast call since day one, and the code discarded it — the same way it discarded wind
+gusts and cloud cover until June.
 
 ## 8. The instrument is part of the model
 
@@ -643,9 +743,15 @@ retrain's test set is a different window. Compare skill-vs-baseline, not raw MAE
 
 ## Conclusion
 
-The question was whether a backyard can beat the forecast. Ten weeks in, it can, for one
-hour, by 42%. Beyond that the honest answer is that **the experiment has not been run**,
-because the model was built without any way to know which backyard it was standing in.
+The question was whether a backyard can beat the forecast. The answer is **yes** — by 42%
+at one hour, and by **25.4% at three hours** once the model is trained on the right target
+and fed elevation-adjusted, quality-screened, upwind neighbour averages. Both of those
+are architectural corrections, not modelling ones. The served model still does neither.
+
+That is the whole report in miniature. The hypothesis was right the entire time; what was
+wrong was a join that ignored the horizon, a feature list with no way to name a station,
+a fixed cohort that averaged the wrong neighbours, and a quarter of the network quietly
+reporting from indoors. None of it was the model.
 
 That is the shape of everything here. The four things this project set out to learn —
 that data matters more than technology, that the fashionable model is often the wrong
