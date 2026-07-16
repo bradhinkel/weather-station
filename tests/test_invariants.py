@@ -158,3 +158,21 @@ def test_rain_fraction_respects_threshold(threshold):
     y = np.full(1000, threshold - 0.01)
     violations = check_rain_positive_fraction(y, threshold_mm=threshold)
     assert violations and "implausibly dry" in violations[0]
+
+
+# --- the rain-model guard (added 2026-07-15) --------------------------------------
+
+def test_pooled_targets_keeps_rain_pooled():
+    """Rain must not train own-station until a wet season supplies positives.
+
+    Retrained own-station on 2026-07-15, all five rain horizons returned zero positive
+    test hours -- the backyard had no wet hours in July and the temporal split puts July
+    in test -- collapsing F1 to 0. This pins the policy so a future refactor cannot
+    quietly flip rain to a target with no rain in it.
+    """
+    from src.ml import POOLED_TARGETS, trains_pooled
+
+    assert trains_pooled("rain_mm_1h") is True
+    assert trains_pooled("temp_c") is False
+    assert "rain_mm_1h" in POOLED_TARGETS
+    assert "temp_c" not in POOLED_TARGETS

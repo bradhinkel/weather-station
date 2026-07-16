@@ -34,6 +34,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy import create_engine, text
 
+from src.ml import trains_pooled
 from src.ml.dataset import _sync_dsn, build_dataset, resolve_own_station_id
 from src.ml.rain_model import TwoStageRainModel
 
@@ -223,11 +224,16 @@ def main():
     # trained on own-station rows alone. Pass --pooled to get the old behaviour.
     station_id = args.station_id
     if station_id is None and not args.pooled:
-        station_id = resolve_own_station_id()
-        if station_id is None:
-            logger.error("No own station (is_network=false) found; pass --pooled to train regionally.")
-            return
-        logger.info("Training on OWN station %s (pass --pooled for the regional model)", station_id)
+        if trains_pooled(args.target):
+            # See src.ml.POOLED_TARGETS: the own station has no wet hours to train or
+            # score a rain model on until the wet season arrives.
+            logger.info("Target %s trains POOLED by policy (see src.ml.POOLED_TARGETS)", args.target)
+        else:
+            station_id = resolve_own_station_id()
+            if station_id is None:
+                logger.error("No own station (is_network=false) found; pass --pooled to train regionally.")
+                return
+            logger.info("Training on OWN station %s (pass --pooled for the regional model)", station_id)
 
     df, feature_cols = build_dataset(args.target, args.horizon, station_id)
     logger.info("Dataset size: %d rows, %d features", len(df), len(feature_cols))
@@ -318,6 +324,21 @@ def main():
             f"{ts_metrics['pr_auc']:.3f}" if ts_metrics["pr_auc"] is not None else "n/a",
             ts_metrics["n_pos_test"], ts_metrics["n_test"],
         )
+        # A rain model scored on zero wet hours is not a model, and its F1 of 0.000 is
+        # not a measurement -- it is the absence of one. Refuse to overwrite a working
+        # bundle with it. This fires when the test window is dry (a Seattle July) or the
+        # station is too sparse; both are conditions to wait out, not to ship. The
+        # existing bundle stays on disk and keeps serving.
+        if ts_metrics["n_pos_test"] == 0:
+            logger.error(
+                "REFUSING to save %s_%dh_twostage: 0 positive (wet) hours in the test "
+                "window of %d rows. F1=0 here means 'no rain to score against', not 'no "
+                "skill'. Keeping the previous bundle. See src.ml.POOLED_TARGETS.",
+                args.target, args.horizon, ts_metrics["n_test"],
+            )
+            summary["twostage"] = {"skipped": "no positive test hours"}
+            print(json.dumps(summary, indent=2))
+            return
         _save(
             {
                 "model": ts, "feature_cols": feature_cols, "metrics": ts_metrics,
